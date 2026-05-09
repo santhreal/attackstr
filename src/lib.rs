@@ -239,7 +239,6 @@ impl StaticPayloads {
     /// let source = StaticPayloads::default();
     /// assert_eq!(source.iter().count(), 0);
     /// ```
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = &Payload> {
         self.payloads.iter()
     }
@@ -263,7 +262,6 @@ impl StaticPayloads {
     /// }]);
     /// assert_eq!(source.iter_category("xss").count(), 1);
     /// ```
-    #[must_use]
     pub fn iter_category<'a>(
         &'a self,
         category: &'a str,
@@ -384,7 +382,6 @@ impl PayloadConfig {
     ///
     /// # Errors
     /// Returns a [`PayloadError`] if reading or parsing the file fails.
-    #[must_use]
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self, PayloadError> {
         Ok(PayloadConfigFile::load(path)?.into_config())
     }
@@ -401,7 +398,6 @@ impl PayloadConfig {
     ///
     /// # Errors
     /// Returns a [`PayloadError`] if parsing the TOML fails.
-    #[must_use]
     pub fn from_toml(toml_str: &str, source: impl Into<String>) -> Result<Self, PayloadError> {
         Ok(PayloadConfigFile::from_toml(toml_str, source.into())?.into_config())
     }

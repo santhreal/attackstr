@@ -114,7 +114,6 @@ impl PayloadDb {
     ///
     /// # Errors
     /// Returns a `PayloadError` if the initial config file fails to load.
-    #[must_use]
     pub fn load_config_and_grammars<P: AsRef<Path>>(
         config_path: P,
     ) -> Result<(Self, Vec<PayloadError>), PayloadError> {
@@ -380,7 +379,6 @@ impl PayloadDb {
     }
 
     /// Stream payloads for a category without materializing the full category at once.
-    #[must_use]
     pub fn iter_payloads<'a>(
         &'a self,
         category: &'a str,
@@ -412,7 +410,6 @@ impl PayloadDb {
     }
 
     /// Iterate over loaded category names in sorted order.
-    #[must_use]
     pub fn iter_categories(&self) -> impl Iterator<Item = &str> {
         let mut categories: Vec<_> = self.grammars.keys().map(String::as_str).collect();
         categories.sort_unstable();
@@ -582,7 +579,7 @@ where
     Hs: Hasher,
 {
     let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(key, _)| *key);
     for (key, value) in entries {
         key.hash(state);
         value.hash(state);

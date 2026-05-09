@@ -84,7 +84,7 @@ impl Hash for Grammar {
         self.encodings.hash(state);
 
         let mut variables: Vec<_> = self.variables.iter().collect();
-        variables.sort_by(|(left, _), (right, _)| left.cmp(right));
+        variables.sort_by_key(|(key, _)| *key);
         for (key, value) in variables {
             key.hash(state);
             value.hash(state);
@@ -266,7 +266,6 @@ const MAX_TEMPLATE_RECURSION_DEPTH: usize = 50;
 /// `for each context × technique × variable_combination × encoding`
 ///
 /// Returns expanded payload records with generation metadata.
-#[must_use]
 pub fn expand(
     grammar: &Grammar,
     custom_encodings: &HashMap<String, fn(&str) -> String>,
