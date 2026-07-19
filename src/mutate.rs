@@ -2,11 +2,13 @@
 
 use std::collections::HashSet;
 
-use crate::encoding::apply_encoding;
+use crate::encoding::{apply_encoding, EncodingError};
 
 /// Generate case-mutated variants of a payload.
-#[must_use]
 pub fn mutate_case(payload: &str) -> Vec<String> {
+    if payload.is_empty() {
+        return Vec::new();
+    }
     collect_unique([
         payload.to_lowercase(),
         payload.to_uppercase(),
@@ -16,16 +18,16 @@ pub fn mutate_case(payload: &str) -> Vec<String> {
 }
 
 /// Generate whitespace and comment-split variants of a payload.
-#[must_use]
 pub fn mutate_whitespace(payload: &str) -> Vec<String> {
     let parts: Vec<&str> = payload.split_whitespace().collect();
     if parts.len() >= 2 {
-        return collect_unique([
+        let variants = collect_unique([
             parts.join("\t"),
             parts.join("\n"),
             parts.join("/**/"),
             parts.join("/*comment*/"),
         ]);
+        return variants.into_iter().filter(|v| v != payload).collect();
     }
 
     let chars: Vec<char> = payload.chars().collect();
@@ -46,10 +48,15 @@ pub fn mutate_whitespace(payload: &str) -> Vec<String> {
 }
 
 /// Generate mixed-encoding variants by applying different transforms to payload segments.
-#[must_use]
-pub fn mutate_encoding_mix(payload: &str, encodings: &[&str]) -> Vec<String> {
+///
+/// # Errors
+/// Returns [`EncodingError::UnknownTransform`] if any encoding name is not recognized.
+pub fn mutate_encoding_mix(
+    payload: &str,
+    encodings: &[&str],
+) -> Result<Vec<String>, EncodingError> {
     if encodings.len() < 2 || payload.len() < 2 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let split_at = payload
@@ -66,17 +73,16 @@ pub fn mutate_encoding_mix(payload: &str, encodings: &[&str]) -> Vec<String> {
             }
             variants.push(format!(
                 "{}{}",
-                apply_encoding(left, left_encoding),
-                apply_encoding(right, right_encoding)
+                apply_encoding(left, left_encoding)?,
+                apply_encoding(right, right_encoding)?
             ));
         }
     }
 
-    collect_unique(variants)
+    Ok(collect_unique(variants))
 }
 
 /// Insert null bytes at various positions.
-#[must_use]
 pub fn mutate_null_bytes(payload: &str) -> Vec<String> {
     if payload.is_empty() {
         return Vec::new();
@@ -105,7 +111,6 @@ pub fn mutate_null_bytes(payload: &str) -> Vec<String> {
 }
 
 /// Generate SQL-specific comment variants for WAF bypass.
-#[must_use]
 pub fn mutate_sql_comments(payload: &str) -> Vec<String> {
     let parts: Vec<&str> = payload.split_whitespace().collect();
     if parts.len() < 2 {
@@ -122,7 +127,6 @@ pub fn mutate_sql_comments(payload: &str) -> Vec<String> {
 }
 
 /// Generate HTML/JS-specific evasion variants.
-#[must_use]
 pub fn mutate_html(payload: &str) -> Vec<String> {
     let mut variants = Vec::new();
 
@@ -149,34 +153,48 @@ pub fn mutate_html(payload: &str) -> Vec<String> {
     if payload.contains('=') {
         variants.push(payload.replace('=', " = "));
         variants.push(payload.replace('=', "\t=\t"));
+        variants.push(payload.replace('=', "\n=\n"));
     }
 
-    // Forward slash insertion in tags.
-    if payload.contains("<script") {
-        variants.push(payload.replace("<script", "<script/"));
-        variants.push(payload.replace("<script", "<ScRiPt"));
-    }
-    if payload.contains("<img") {
-        variants.push(payload.replace("<img", "<img/"));
-        variants.push(payload.replace("<img", "<IMG"));
+    // Forward slash insertion in common tags.
+    let tags = [
+        "script", "img", "svg", "body", "iframe", "object", "embed", "math", "a", "form",
+    ];
+    for tag in tags {
+        let lower_tag = format!("<{tag}");
+        if payload.to_lowercase().contains(&lower_tag) {
+            let mixed_tag = format!("<{}", alternate_case(tag, 1));
+            variants.push(payload.to_lowercase().replace(&lower_tag, &mixed_tag));
+            // Randomly insert slashes and alternate case for the tag
+            variants.push(
+                payload
+                    .to_lowercase()
+                    .replace(&lower_tag, &format!("<{tag}/")),
+            );
+            variants.push(
+                payload
+                    .to_lowercase()
+                    .replace(&lower_tag, &format!("<{tag}    ")),
+            );
+        }
     }
 
     collect_unique(variants)
 }
 
 /// Generate unicode normalization bypass variants.
-#[must_use]
 pub fn mutate_unicode(payload: &str) -> Vec<String> {
     let mut variants = Vec::new();
     // Fullwidth character substitution (A → Ａ, < → ＜).
+    // Valid only for pure ASCII range 0x21 to 0x7E
     let fullwidth: String = payload
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c.is_ascii_punctuation() {
-                (c as u32)
-                    .checked_add(0xFEE0)
-                    .and_then(char::from_u32)
-                    .unwrap_or(c)
+            let u = c as u32;
+            if (0x21..=0x7E).contains(&u) {
+                char::from_u32(u + 0xFEE0).unwrap_or(c)
+            } else if u == 0x20 {
+                '\u{3000}' // Ideographic space for normal space
             } else {
                 c
             }
@@ -186,16 +204,22 @@ pub fn mutate_unicode(payload: &str) -> Vec<String> {
         variants.push(fullwidth);
     }
 
-    // Homoglyph substitution (a → а cyrillic, o → ο greek).
+    // Homoglyph substitution (expanded set).
     let homoglyph: String = payload
         .chars()
-        .map(|c| match c {
-            'a' => '\u{0430}', // cyrillic а
-            'e' => '\u{0435}', // cyrillic е
-            'o' => '\u{03BF}', // greek ο
-            'p' => '\u{0440}', // cyrillic р
-            'c' => '\u{0441}', // cyrillic с
-            'x' => '\u{0445}', // cyrillic х
+        .map(|c| match c.to_ascii_lowercase() {
+            'a' => '\u{0430}',  // cyrillic а
+            'e' => '\u{0435}',  // cyrillic е
+            'o' => '\u{03BF}',  // greek ο
+            'p' => '\u{0440}',  // cyrillic р
+            'c' => '\u{0441}',  // cyrillic с
+            'x' => '\u{0445}',  // cyrillic х
+            'y' => '\u{0443}',  // cyrillic у
+            'd' => '\u{217E}',  // small roman numeral d
+            '>' => '\u{FE65}',  // small greater-than sign
+            '<' => '\u{FE64}',  // small less-than sign
+            '\'' => '\u{02B9}', // modifier letter prime
+            '"' => '\u{02BA}',  // modifier letter double prime
             _ => c,
         })
         .collect();
@@ -207,39 +231,39 @@ pub fn mutate_unicode(payload: &str) -> Vec<String> {
 }
 
 /// Combine all built-in mutations into a deduplicated set.
-#[must_use]
-pub fn mutate_all(payload: &str) -> Vec<String> {
+///
+/// # Errors
+/// Returns [`EncodingError::UnknownTransform`] if an encoding name in the mix is not recognized.
+pub fn mutate_all(payload: &str) -> Result<Vec<String>, EncodingError> {
     let mut variants = Vec::new();
     variants.extend(mutate_case(payload));
     variants.extend(mutate_whitespace(payload));
     variants.extend(mutate_encoding_mix(
         payload,
         &["url_encode", "html_entities", "unicode"],
-    ));
+    )?);
     variants.extend(mutate_null_bytes(payload));
     variants.extend(mutate_sql_comments(payload));
     variants.extend(mutate_html(payload));
     variants.extend(mutate_unicode(payload));
-    collect_unique(variants)
+    Ok(collect_unique(variants))
 }
 
 fn alternate_case(payload: &str, offset: usize) -> String {
-    payload
-        .chars()
-        .enumerate()
-        .map(|(idx, ch)| {
-            if !ch.is_ascii_alphabetic() {
-                return ch.to_string();
-            }
-
-            if (idx + offset) % 2 == 0 {
-                ch.to_ascii_lowercase().to_string()
-            } else {
-                ch.to_ascii_uppercase().to_string()
-            }
-        })
-        .collect()
+    // Push into one pre-sized buffer instead of allocating a `String` per char.
+    let mut out = String::with_capacity(payload.len());
+    for (idx, ch) in payload.chars().enumerate() {
+        if !ch.is_ascii_alphabetic() {
+            out.push(ch);
+        } else if (idx + offset) % 2 == 0 {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch.to_ascii_uppercase());
+        }
+    }
+    out
 }
+
 
 fn collect_unique<I>(variants: I) -> Vec<String>
 where
@@ -250,182 +274,4 @@ where
         .into_iter()
         .filter(|variant| seen.insert(variant.clone()))
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn case_mutations_are_generated() {
-        let variants = mutate_case("ScRiPt");
-        assert!(variants.contains(&"script".to_string()));
-        assert!(variants.contains(&"SCRIPT".to_string()));
-        assert!(variants.contains(&"sCrIpT".to_string()));
-        assert!(variants.contains(&"ScRiPt".to_string()));
-    }
-
-    #[test]
-    fn whitespace_mutations_are_generated() {
-        let variants = mutate_whitespace("UNION SELECT");
-        assert!(variants.contains(&"UNION\tSELECT".to_string()));
-        assert!(variants.contains(&"UNION\nSELECT".to_string()));
-        assert!(variants.contains(&"UNION/**/SELECT".to_string()));
-    }
-
-    #[test]
-    fn encoding_mix_mutations_are_generated() {
-        let variants = mutate_encoding_mix("alert(1)", &["url_encode", "unicode"]);
-        assert!(!variants.is_empty());
-        assert!(variants.iter().any(|variant| variant.contains('%')));
-        assert!(variants.iter().any(|variant| variant.contains("\\u")));
-    }
-
-    #[test]
-    fn all_mutations_combine_strategies() {
-        let variants = mutate_all("UNION SELECT");
-        assert!(variants.iter().any(|variant| variant.contains("/**/")));
-        assert!(variants.iter().any(|variant| variant.contains('%')));
-        assert!(variants.iter().any(|variant| variant != "UNION SELECT"));
-    }
-
-    #[test]
-    fn null_byte_mutations() {
-        let variants = mutate_null_bytes("test");
-        assert!(variants.iter().any(|v| v.starts_with("%00")));
-        assert!(variants.iter().any(|v| v.ends_with("%00")));
-        assert!(variants
-            .iter()
-            .any(|v| v.contains("%00") && !v.starts_with("%00") && !v.ends_with("%00")));
-    }
-
-    #[test]
-    fn null_byte_empty_input() {
-        assert!(mutate_null_bytes("").is_empty());
-    }
-
-    #[test]
-    fn null_byte_short_inputs_only_use_prefix_and_suffix_variants() {
-        let variants = mutate_null_bytes("x");
-        assert_eq!(variants.len(), 4);
-        assert!(variants.iter().any(|v| v == "%00x"));
-        assert!(variants.iter().any(|v| v == "x%00"));
-        assert!(variants.iter().any(|v| v == "x\x00"));
-        assert!(variants.iter().any(|v| v == "\x00x"));
-    }
-
-    #[test]
-    fn sql_comment_mutations() {
-        let variants = mutate_sql_comments("UNION SELECT 1");
-        assert!(variants.iter().any(|v| v.contains("/**/")));
-        assert!(variants.iter().any(|v| v.contains("/*!*/")));
-        assert!(variants.iter().any(|v| v.contains("--\n")));
-        assert!(variants.iter().any(|v| v.contains("#\n")));
-    }
-
-    #[test]
-    fn sql_comment_single_word_returns_empty() {
-        assert!(mutate_sql_comments("SELECT").is_empty());
-    }
-
-    #[test]
-    fn html_mutations_tag_case() {
-        let variants = mutate_html("<script>alert(1)</script>");
-        assert!(variants.iter().any(|v| v.contains("<SCRIPT")));
-        assert!(variants.iter().any(|v| v.contains("<ScRiPt")));
-        assert!(variants.iter().any(|v| v.contains("<script/")));
-    }
-
-    #[test]
-    fn html_mutations_quote_variants() {
-        let variants = mutate_html("onload=\"alert(1)\"");
-        assert!(variants.iter().any(|v| v.contains('\'')));
-        assert!(variants.iter().any(|v| v.contains('`')));
-    }
-
-    #[test]
-    fn html_mutations_no_tags_returns_fewer() {
-        let variants = mutate_html("plain text");
-        // No tags, no quotes, no equals — should produce nothing.
-        assert!(variants.is_empty());
-    }
-
-    #[test]
-    fn unicode_fullwidth_mutation() {
-        let variants = mutate_unicode("alert");
-        assert!(!variants.is_empty());
-        // Fullwidth 'a' is U+FF41.
-        assert!(variants.iter().any(|v| v.contains('\u{FF41}')));
-    }
-
-    #[test]
-    fn unicode_homoglyph_mutation() {
-        let variants = mutate_unicode("exec");
-        assert!(!variants.is_empty());
-        // Cyrillic 'е' (U+0435) replaces 'e'.
-        assert!(variants.iter().any(|v| v.contains('\u{0435}')));
-    }
-
-    #[test]
-    fn unicode_no_substitutable_chars() {
-        let variants = mutate_unicode("123");
-        // Fullwidth digits exist, so we should get a variant.
-        assert!(!variants.is_empty());
-    }
-
-    #[test]
-    fn unicode_high_codepoint_does_not_overflow() {
-        let variants = mutate_unicode("\u{10ffff}");
-        assert!(variants.is_empty());
-    }
-
-    #[test]
-    fn mutate_all_includes_new_strategies() {
-        let variants = mutate_all("UNION SELECT 1");
-        // Should include SQL comments.
-        assert!(variants.iter().any(|v| v.contains("/*!*/")));
-        // Should include null bytes.
-        assert!(variants.iter().any(|v| v.contains("%00")));
-    }
-
-    #[test]
-    fn mutate_all_deduplicates() {
-        let variants = mutate_all("test");
-        let unique: std::collections::HashSet<&String> = variants.iter().collect();
-        assert_eq!(
-            variants.len(),
-            unique.len(),
-            "mutate_all produced duplicates"
-        );
-    }
-
-    #[test]
-    fn case_mutation_preserves_non_alpha() {
-        let variants = mutate_case("alert(1)");
-        for v in &variants {
-            assert!(v.contains("(1)"), "non-alpha chars altered in: {v}");
-        }
-    }
-
-    #[test]
-    fn whitespace_mutation_single_char() {
-        // Single char = too short, should return empty.
-        assert!(mutate_whitespace("x").is_empty());
-    }
-
-    #[test]
-    fn encoding_mix_single_encoding() {
-        // Need at least 2 encodings to mix.
-        assert!(mutate_encoding_mix("test", &["url_encode"]).is_empty());
-    }
-
-    #[test]
-    fn encoding_mix_empty_payload() {
-        assert!(mutate_encoding_mix("", &["url_encode", "hex"]).is_empty());
-    }
-
-    #[test]
-    fn encoding_mix_single_char() {
-        assert!(mutate_encoding_mix("x", &["url_encode", "hex"]).is_empty());
-    }
 }

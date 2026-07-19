@@ -1,8 +1,20 @@
+#![warn(clippy::pedantic)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::panic
+    )
+)]
+#![allow(clippy::module_name_repetitions)]
 //! # attackstr
 //!
 //! Grammar-based security payload generation for the Santh ecosystem.
 //!
-//! Every security tool needs attack payloads — `SQLi`, XSS, command injection,
+//! Every security tool needs attack payloads  -  `SQLi`, XSS, command injection,
 //! SSTI, SSRF, XXE, and more. This crate provides a single, configurable
 //! engine that all Santh tools share. Upgrade payloads once, every tool
 //! benefits.
@@ -68,18 +80,19 @@
 /// TOML-configurable settings.
 pub mod config;
 mod encoding;
-mod grammar;
+pub mod grammar;
 mod loader;
 mod mutate;
-/// Legacy payloads and custom validators imported from older suites.
+#[cfg(feature = "exploits")]
 pub mod ports;
 /// Grammar validation.
 pub mod validate;
 
-pub use config::PayloadConfigFile;
-pub use encoding::{apply_encoding, BuiltinEncoding, CustomEncoder, Encoder};
+pub use config::{parse_marker_position, PayloadConfigFile};
+pub use encoding::{apply_encoding, BuiltinEncoding, CustomEncoder, Encoder, EncodingError};
 pub use grammar::{
-    Context, Encoding, Grammar, GrammarMeta, Technique, TemplateExpansionError, Variable,
+    depluralize, expand, expand_template, Context, Encoding, Grammar, GrammarMeta, Technique,
+    TemplateExpansionError, Variable,
 };
 pub use loader::PayloadDb;
 pub use mutate::{
@@ -146,6 +159,7 @@ pub trait PayloadSource {
 ///         severity: None,
 ///         confidence: 1.0,
 ///         expected_pattern: None,
+///         target_media_type: None,
 ///     },
 /// ];
 ///
@@ -176,12 +190,12 @@ impl StaticPayloads {
     ///     severity: None,
     ///     confidence: 1.0,
     ///     expected_pattern: None,
+    ///     target_media_type: None,
     /// }];
     ///
     /// let source = StaticPayloads::new(payloads);
     /// assert_eq!(source.all_payloads().len(), 1);
     /// ```
-    #[must_use]
     pub fn new(mut payloads: Vec<Payload>) -> Self {
         sort_payloads_by_category(&mut payloads);
         Self {
@@ -207,6 +221,7 @@ impl StaticPayloads {
     ///     severity: None,
     ///     confidence: 1.0,
     ///     expected_pattern: None,
+    ///     target_media_type: None,
     /// });
     /// assert_eq!(source.all_payloads().len(), 1);
     /// ```
@@ -225,7 +240,6 @@ impl StaticPayloads {
     /// let source = StaticPayloads::default();
     /// assert!(source.all_payloads().is_empty());
     /// ```
-    #[must_use]
     pub fn all_payloads(&self) -> &[Payload] {
         &self.payloads
     }
@@ -259,6 +273,7 @@ impl StaticPayloads {
     ///     severity: None,
     ///     confidence: 1.0,
     ///     expected_pattern: None,
+    ///     target_media_type: None,
     /// }]);
     /// assert_eq!(source.iter_category("xss").count(), 1);
     /// ```
@@ -349,6 +364,8 @@ pub struct PayloadConfig {
     pub target_runtime: Option<Vec<String>>,
     /// Where to place the taint marker in generated marker payloads.
     pub marker_position: MarkerPosition,
+    /// Maximum length of a single payload in bytes (0 = unlimited).
+    pub max_payload_length: usize,
 }
 
 impl PayloadConfig {
@@ -361,7 +378,6 @@ impl PayloadConfig {
     /// let config = PayloadConfig::builder().marker_prefix("TRACE").build();
     /// assert_eq!(config.marker_prefix, "TRACE");
     /// ```
-    #[must_use]
     pub fn builder() -> PayloadConfigBuilder {
         PayloadConfigBuilder::default()
     }
@@ -383,7 +399,7 @@ impl PayloadConfig {
     /// # Errors
     /// Returns a [`PayloadError`] if reading or parsing the file fails.
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self, PayloadError> {
-        Ok(PayloadConfigFile::load(path)?.into_config())
+        PayloadConfigFile::load(path)?.into_config()
     }
 
     /// Parse a [`PayloadConfig`] directly from TOML text.
@@ -399,7 +415,7 @@ impl PayloadConfig {
     /// # Errors
     /// Returns a [`PayloadError`] if parsing the TOML fails.
     pub fn from_toml(toml_str: &str, source: impl Into<String>) -> Result<Self, PayloadError> {
-        Ok(PayloadConfigFile::from_toml(toml_str, source.into())?.into_config())
+        PayloadConfigFile::from_toml(toml_str, source.into())?.into_config()
     }
 }
 
@@ -423,6 +439,7 @@ impl Default for PayloadConfig {
             include_categories: Vec::new(),
             target_runtime: None,
             marker_position: MarkerPosition::Prefix,
+            max_payload_length: 100_000,
         }
     }
 }
@@ -472,51 +489,50 @@ impl std::fmt::Display for PayloadConfigBuilder {
 
 impl PayloadConfigBuilder {
     /// Set the maximum payload count per category.
-    #[must_use]
     pub fn max_per_category(mut self, max_per_category: usize) -> Self {
         self.config.max_per_category = max_per_category;
         self
     }
 
     /// Set whether identical payloads should be deduplicated.
-    #[must_use]
     pub fn deduplicate(mut self, deduplicate: bool) -> Self {
         self.config.deduplicate = deduplicate;
         self
     }
 
     /// Set the marker prefix.
-    #[must_use]
     pub fn marker_prefix(mut self, marker_prefix: impl Into<String>) -> Self {
         self.config.marker_prefix = marker_prefix.into();
         self
     }
 
     /// Set the categories to exclude.
-    #[must_use]
     pub fn exclude_categories(mut self, exclude_categories: Vec<String>) -> Self {
         self.config.exclude_categories = exclude_categories;
         self
     }
 
     /// Set the categories to include.
-    #[must_use]
     pub fn include_categories(mut self, include_categories: Vec<String>) -> Self {
         self.config.include_categories = include_categories;
         self
     }
 
     /// Set the allowed target runtimes.
-    #[must_use]
     pub fn target_runtime(mut self, target_runtime: Option<Vec<String>>) -> Self {
         self.config.target_runtime = target_runtime;
         self
     }
 
     /// Set the marker placement strategy.
-    #[must_use]
     pub fn marker_position(mut self, marker_position: MarkerPosition) -> Self {
         self.config.marker_position = marker_position;
+        self
+    }
+
+    /// Set the maximum length of a single payload in bytes.
+    pub fn max_payload_length(mut self, max_payload_length: usize) -> Self {
+        self.config.max_payload_length = max_payload_length;
         self
     }
 
@@ -529,7 +545,6 @@ impl PayloadConfigBuilder {
     /// let config = PayloadConfig::builder().max_per_category(10).build();
     /// assert_eq!(config.max_per_category, 10);
     /// ```
-    #[must_use]
     pub fn build(self) -> PayloadConfig {
         self.config
     }
@@ -550,7 +565,7 @@ fn sort_payloads_by_category(payloads: &mut [Payload]) {
 ///
 /// # Thread Safety
 /// `Payload` is `Send` and `Sync`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Payload {
     /// The payload string.
     pub text: String,
@@ -570,6 +585,24 @@ pub struct Payload {
     pub confidence: f64,
     /// Optional regex pattern expected in the observed response.
     pub expected_pattern: Option<String>,
+    /// Target media type for correct downstream escaping.
+    #[serde(default)]
+    pub target_media_type: Option<String>,
+}
+
+impl PartialEq for Payload {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.category == other.category
+            && self.technique == other.technique
+            && self.context == other.context
+            && self.encoding == other.encoding
+            && self.cwe == other.cwe
+            && self.severity == other.severity
+            && self.confidence.to_bits() == other.confidence.to_bits()
+            && self.expected_pattern == other.expected_pattern
+            && self.target_media_type == other.target_media_type
+    }
 }
 
 impl Default for Payload {
@@ -584,6 +617,7 @@ impl Default for Payload {
             severity: None,
             confidence: 1.0,
             expected_pattern: None,
+            target_media_type: None,
         }
     }
 }
@@ -601,6 +635,7 @@ impl Hash for Payload {
         self.severity.hash(state);
         self.confidence.to_bits().hash(state);
         self.expected_pattern.hash(state);
+        self.target_media_type.hash(state);
     }
 }
 
@@ -662,6 +697,9 @@ pub enum PayloadError {
     /// Another directory load is already in progress for this database instance.
     #[error("payload database load is already in progress. Fix: wait for the current `load_dir` call to finish before starting another one on the same `PayloadDb`.")]
     ConcurrentLoad,
+    /// Invalid configuration value encountered during conversion.
+    #[error("invalid configuration value: {0}. Fix: check your config file against the supported options.")]
+    InvalidConfig(String),
 }
 
 impl Serialize for PayloadError {
@@ -685,11 +723,15 @@ impl<'de> Deserialize<'de> for PayloadError {
     {
         #[derive(Deserialize)]
         struct PayloadErrorWire {
+            kind: String,
             message: String,
         }
 
         let wire = PayloadErrorWire::deserialize(deserializer)?;
-        Ok(Self::Io(std::io::Error::other(wire.message)))
+        Ok(Self::Io(std::io::Error::other(format!(
+            "[{}] {}",
+            wire.kind, wire.message
+        ))))
     }
 }
 
@@ -703,6 +745,7 @@ impl PayloadError {
             Self::TemplateExpansion { .. } => "template_expansion",
             Self::NotADirectory(_) => "not_a_directory",
             Self::ConcurrentLoad => "concurrent_load",
+            Self::InvalidConfig(_) => "invalid_config",
         }
     }
 
@@ -744,6 +787,16 @@ impl PayloadError {
                     "template expansion error in {file}: {source}. Fix: reduce Cartesian product size (contexts x techniques x variables) to stay below the {limit} limit."
                 );
             }
+            TemplateExpansionError::ExpansionLengthExceeded { max_len } => {
+                return format!(
+                    "template expansion error in {file}: {source}. Fix: remove exponential variable growth so expansion stays below {max_len} bytes."
+                );
+            }
+            TemplateExpansionError::UnknownEncoding { transform } => {
+                return format!(
+                    "template expansion error in {file}: {source}. Fix: register `{transform}` via `PayloadDb::register_encoding`, or replace the reference with a known built-in (raw, url_encode, html_encode, double_url_encode, hex_encode, unicode_escape, base64)."
+                );
+            }
         };
 
         format!("template expansion error in {file}: {source}. {fix}")
@@ -751,341 +804,13 @@ impl PayloadError {
 
     fn grammar_validation_message(file: &str, issues: &[GrammarIssue]) -> String {
         let issue_count = issues.len();
-        let summary = issues
-            .first()
-            .map(|issue| format!("{}: {}", issue.level, issue.message))
-            .unwrap_or_else(|| "unknown validation failure".to_string());
+        let summary = issues.first().map_or_else(
+            || "unknown validation failure".to_string(),
+            |issue| format!("{}: {}", issue.level, issue.message),
+        );
         format!(
             "grammar validation error in {file}: {summary}. Fix: resolve the reported validation issue{plural} before loading the grammar.",
             plural = if issue_count == 1 { "" } else { "s" }
         )
     }
-}
-
-#[cfg(test)]
-mod adversarial_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn payload_round_trips_with_serde() {
-        let payload = Payload {
-            text: "alert(1)".into(),
-            category: "xss".into(),
-            technique: "basic".into(),
-            context: "default".into(),
-            encoding: "raw".into(),
-            cwe: Some("CWE-79".into()),
-            severity: Some("high".into()),
-            confidence: 0.9,
-            expected_pattern: Some("alert".into()),
-        };
-
-        let encoded = toml::to_string(&payload).unwrap();
-        let decoded: Payload = toml::from_str(&encoded).unwrap();
-        assert_eq!(decoded, payload);
-    }
-
-    #[test]
-    fn payload_config_builder_overrides_defaults() {
-        let config = PayloadConfig::builder()
-            .max_per_category(100)
-            .deduplicate(false)
-            .marker_prefix("TAINT")
-            .exclude_categories(vec!["xxe".into()])
-            .include_categories(vec!["xss".into()])
-            .target_runtime(Some(vec!["php".into()]))
-            .marker_position(MarkerPosition::Suffix)
-            .build();
-
-        assert_eq!(config.max_per_category, 100);
-        assert!(!config.deduplicate);
-        assert_eq!(config.marker_prefix, "TAINT");
-        assert_eq!(config.exclude_categories, vec!["xxe"]);
-        assert_eq!(config.include_categories, vec!["xss"]);
-        assert_eq!(config.target_runtime, Some(vec!["php".into()]));
-        assert_eq!(config.marker_position, MarkerPosition::Suffix);
-    }
-
-    #[test]
-    fn payload_config_loads_from_toml() {
-        let config = PayloadConfig::from_toml(
-            r#"
-max_per_category = 25
-deduplicate = false
-marker_position = "suffix"
-"#,
-            "<test>",
-        )
-        .unwrap();
-
-        assert_eq!(config.max_per_category, 25);
-        assert!(!config.deduplicate);
-        assert_eq!(config.marker_position, MarkerPosition::Suffix);
-    }
-
-    #[test]
-    fn payload_config_loads_from_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("payloads.toml");
-        std::fs::write(&path, "marker_prefix = \"TRACE\"\n").unwrap();
-
-        let config = PayloadConfig::load(&path).unwrap();
-
-        assert_eq!(config.marker_prefix, "TRACE");
-    }
-}
-
-#[cfg(test)]
-mod payload_source_tests {
-    use super::*;
-
-    fn create_test_payload(text: &str, category: &str) -> Payload {
-        Payload {
-            text: text.into(),
-            category: category.into(),
-            technique: "test".into(),
-            context: "default".into(),
-            encoding: "raw".into(),
-            cwe: None,
-            severity: None,
-            confidence: 1.0,
-            expected_pattern: None,
-        }
-    }
-
-    #[test]
-    fn static_payloads_empty() {
-        let source = StaticPayloads::new(vec![]);
-        assert_eq!(source.payload_count(), 0);
-        assert!(source.categories().is_empty());
-    }
-
-    #[test]
-    fn static_payloads_single_category() {
-        let payloads = vec![
-            create_test_payload("payload1", "sqli"),
-            create_test_payload("payload2", "sqli"),
-        ];
-        let source = StaticPayloads::new(payloads);
-
-        assert_eq!(source.payload_count(), 2);
-        let cats = source.categories();
-        assert_eq!(cats.len(), 1);
-        assert_eq!(cats[0], "sqli");
-    }
-
-    #[test]
-    fn static_payloads_multiple_categories() {
-        let payloads = vec![
-            create_test_payload("p1", "sqli"),
-            create_test_payload("p2", "xss"),
-            create_test_payload("p3", "rce"),
-        ];
-        let source = StaticPayloads::new(payloads);
-
-        assert_eq!(source.payload_count(), 3);
-        let mut cats = source.categories();
-        cats.sort_unstable();
-        assert_eq!(cats, vec!["rce", "sqli", "xss"]);
-    }
-
-    #[test]
-    fn static_payloads_add() {
-        let mut source = StaticPayloads::new(vec![]);
-        source.add(create_test_payload("test", "cat"));
-
-        assert_eq!(source.payload_count(), 1);
-    }
-
-    #[test]
-    fn static_payloads_from_vec() {
-        let payloads = vec![create_test_payload("test", "cat")];
-        let source: StaticPayloads = payloads.into();
-
-        assert_eq!(source.payload_count(), 1);
-    }
-
-    #[test]
-    fn static_payloads_default() {
-        let source = StaticPayloads::default();
-        assert_eq!(source.payload_count(), 0);
-    }
-
-    #[test]
-    fn static_payloads_all_payloads() {
-        let payloads = vec![
-            create_test_payload("p1", "sqli"),
-            create_test_payload("p2", "xss"),
-        ];
-        let source = StaticPayloads::new(payloads);
-
-        assert_eq!(source.all_payloads().len(), 2);
-    }
-
-    #[test]
-    fn static_payloads_group_interleaved_categories() {
-        let payloads = vec![
-            create_test_payload("p1", "xss"),
-            create_test_payload("p2", "sqli"),
-            create_test_payload("p3", "xss"),
-        ];
-        let mut source = StaticPayloads::new(payloads);
-
-        let xss = source.payloads("xss");
-        assert_eq!(xss.len(), 2);
-        assert!(xss.iter().all(|payload| payload.category == "xss"));
-    }
-
-    #[test]
-    fn static_payloads_iter_category_filters() {
-        let payloads = vec![
-            create_test_payload("p1", "xss"),
-            create_test_payload("p2", "sqli"),
-            create_test_payload("p3", "xss"),
-        ];
-        let source = StaticPayloads::new(payloads);
-
-        let texts: Vec<_> = source
-            .iter_category("xss")
-            .map(|payload| payload.text.as_str())
-            .collect();
-
-        assert_eq!(texts, vec!["p1", "p3"]);
-    }
-
-    #[test]
-    fn static_payloads_iter_returns_all_items() {
-        let payloads = vec![
-            create_test_payload("p1", "xss"),
-            create_test_payload("p2", "sqli"),
-        ];
-        let source = StaticPayloads::new(payloads);
-
-        let texts: Vec<_> = source.iter().map(|payload| payload.text.as_str()).collect();
-        assert_eq!(texts, vec!["p2", "p1"]);
-    }
-
-    #[test]
-    fn payload_db_implements_payload_source() {
-        fn use_trait(source: &mut dyn PayloadSource) -> usize {
-            source.payload_count()
-        }
-
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "test"
-sink_category = "test-cat"
-
-[[contexts]]
-name = "default"
-prefix = ""
-suffix = ""
-
-[[techniques]]
-name = "t1"
-template = "hello"
-"#,
-        )
-        .unwrap();
-
-        // Test through the trait interface
-        assert_eq!(use_trait(&mut db), 1);
-
-        let cats = db.categories();
-        assert_eq!(cats.len(), 1);
-        assert_eq!(cats[0], "test-cat");
-
-        let payloads = db.payloads("test-cat");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].text, "hello");
-    }
-
-    #[test]
-    fn static_payloads_implements_payload_source() {
-        fn use_trait(s: &mut dyn PayloadSource) -> usize {
-            s.payload_count()
-        }
-
-        let payloads = vec![
-            create_test_payload("p1", "cat1"),
-            create_test_payload("p2", "cat2"),
-        ];
-        let mut source = StaticPayloads::new(payloads);
-
-        // Test through the trait interface
-        assert_eq!(use_trait(&mut source), 2);
-    }
-
-    #[test]
-    fn payload_source_trait_object_works() {
-        let payloads = vec![create_test_payload("test", "cat")];
-        let source: Box<dyn PayloadSource> = Box::new(StaticPayloads::new(payloads));
-
-        assert_eq!(source.payload_count(), 1);
-        assert_eq!(source.categories(), vec!["cat"]);
-    }
-}
-
-#[cfg(test)]
-mod encoder_tests {
-    use super::encoding::{CustomEncoder, Encoder};
-
-    #[test]
-    fn custom_encoder_new() {
-        let encoder = CustomEncoder::new(|s: &str| s.to_uppercase());
-        assert_eq!(encoder.encode("hello"), "HELLO");
-    }
-
-    #[test]
-    fn custom_encoder_default() {
-        let encoder = CustomEncoder::default();
-        assert_eq!(encoder.encode("hello"), "hello");
-    }
-
-    #[test]
-    fn encoder_trait_for_fn() {
-        fn upper(s: &str) -> String {
-            s.to_uppercase()
-        }
-        let encoder: &dyn Encoder = &upper;
-        assert_eq!(encoder.encode("hello"), "HELLO");
-    }
-
-    #[test]
-    fn encoder_trait_for_closure() {
-        let reverse = |s: &str| s.chars().rev().collect::<String>();
-        assert_eq!(reverse.encode("hello"), "olleh");
-    }
-
-    #[test]
-    fn encoder_trait_for_rot13() {
-        let rot13 = |s: &str| {
-            s.chars()
-                .map(|c| match c {
-                    'a'..='m' | 'A'..='M' => (c as u8 + 13) as char,
-                    'n'..='z' | 'N'..='Z' => (c as u8 - 13) as char,
-                    _ => c,
-                })
-                .collect::<String>()
-        };
-        assert_eq!(rot13.encode("hello"), "uryyb");
-    }
-}
-
-/// Convenience re-exports for common usage.
-///
-/// ```rust
-/// use attackstr::prelude::*;
-/// ```
-pub mod prelude {
-    pub use crate::config::PayloadConfigFile;
-    pub use crate::validate::{validate, GrammarIssue};
-    pub use crate::{apply_encoding, BuiltinEncoding};
-    pub use crate::{mutate_all, mutate_case, mutate_whitespace};
-    pub use crate::{Payload, PayloadConfig, PayloadDb, PayloadError};
 }

@@ -46,8 +46,10 @@ transform = "url_encode"
         );
     }
 
-    let mutated = mutate_all(&db.payloads("xss")[0].text);
-    println!("generated {} evasive variants", mutated.len());
+    match mutate_all(&db.payloads("xss")[0].text) {
+        Ok(mutated) => println!("generated {} evasive variants", mutated.len()),
+        Err(e) => eprintln!("mutation error: {e}"),
+    }
 
     Ok(())
 }

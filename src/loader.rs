@@ -1,4 +1,4 @@
-//! Payload database — loads grammars from TOML files, expands payloads, serves them.
+//! Payload database  -  loads grammars from TOML files, expands payloads, serves them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::grammar::{self, ExpandedPayload, Grammar, GrammarExpansionIter};
-use crate::validate::{validate, IssueLevel};
+use crate::validate::{validate, GrammarIssue, IssueLevel};
 use crate::{MarkerPosition, Payload, PayloadConfig, PayloadConfigFile, PayloadError};
 
 /// The central payload database. Loads grammars, expands payloads, serves them.
@@ -53,7 +53,7 @@ use crate::{MarkerPosition, Payload, PayloadConfig, PayloadConfigFile, PayloadEr
 /// let payloads = db.payloads("test-injection");
 /// assert_eq!(payloads.len(), 1);
 /// ```
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct PayloadDb {
     /// Configuration.
     config: PayloadConfig,
@@ -63,10 +63,22 @@ pub struct PayloadDb {
     cache: HashMap<String, Vec<Payload>>,
     /// Custom encoding functions.
     #[serde(skip, default)]
-    custom_encodings: HashMap<String, fn(&str) -> String>,
+    custom_encodings: HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
     /// Guards directory loads so concurrent callers fail explicitly.
     #[serde(skip, default = "default_load_state")]
     load_in_progress: Arc<AtomicBool>,
+}
+
+impl Clone for PayloadDb {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            grammars: self.grammars.clone(),
+            cache: self.cache.clone(),
+            custom_encodings: self.custom_encodings.clone(),
+            load_in_progress: default_load_state(),
+        }
+    }
 }
 
 impl PartialEq for PayloadDb {
@@ -87,13 +99,11 @@ impl Hash for PayloadDb {
 
 impl PayloadDb {
     /// Create a new empty database with default config.
-    #[must_use]
     pub fn new() -> Self {
         Self::with_config(PayloadConfig::default())
     }
 
     /// Create a new database with the given configuration.
-    #[must_use]
     pub fn with_config(config: PayloadConfig) -> Self {
         Self {
             config,
@@ -121,7 +131,7 @@ impl PayloadDb {
         let config_file = PayloadConfigFile::load(config_path)?;
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
 
-        let mut db = Self::with_config(config_file.clone().into_config());
+        let mut db = Self::with_config(config_file.clone().into_config()?);
         let mut errors = Vec::new();
 
         for grammar_dir in config_file.grammar_dirs() {
@@ -140,9 +150,22 @@ impl PayloadDb {
     /// Register a custom encoding transform.
     ///
     /// Custom encodings take precedence over built-ins with the same name.
-    pub fn register_encoding(&mut self, name: &str, func: fn(&str) -> String) {
-        self.custom_encodings.insert(name.to_string(), func);
-        self.cache.clear(); // Invalidate cache — encodings changed.
+    /// Closures capturing state are supported.
+    ///
+    /// # Example
+    /// ```rust
+    /// use attackstr::PayloadDb;
+    ///
+    /// let mut db = PayloadDb::new();
+    /// let salt = "abc".to_string();
+    /// db.register_encoding("salted", move |s| format!("{salt}{s}"));
+    /// ```
+    pub fn register_encoding<F>(&mut self, name: &str, func: F)
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        self.custom_encodings.insert(name.to_string(), Arc::new(func));
+        self.cache.clear(); // Invalidate cache  -  encodings changed.
     }
 
     fn runtime_allowed(&self, grammar: &Grammar) -> bool {
@@ -167,7 +190,7 @@ impl PayloadDb {
     /// Load all `.toml` grammar files from a directory.
     ///
     /// Non-TOML files are silently skipped. Subdirectories are NOT recursed
-    /// (flat layout by design — one category per file or split across files).
+    /// (flat layout by design  -  one category per file or split across files).
     ///
     /// # Errors
     /// Returns a `PayloadError` if the path doesn't exist or isn't a directory.
@@ -260,7 +283,14 @@ impl PayloadDb {
             errors.push(error);
             return None;
         }
-        if let Err(source) = grammar::expand(&grammar, &self.custom_encodings) {
+        // Lightweight validation: ensure the grammar can produce at least one payload
+        // without materialising the entire expansion.
+        let validation_result = grammar::iter_expanded(&grammar, &self.custom_encodings, self.config.max_payload_length)
+            .and_then(|mut iter| match iter.next() {
+                Some(Err(e)) => Err(e),
+                _ => Ok(()),
+            });
+        if let Err(source) = validation_result {
             errors.push(PayloadError::TemplateExpansion {
                 file: file_path.display().to_string(),
                 source,
@@ -313,11 +343,14 @@ impl PayloadDb {
                 source: Box::new(e),
             })?;
         self.validate_grammar(&grammar, source_name)?;
-        grammar::expand(&grammar, &self.custom_encodings).map_err(|source| {
-            PayloadError::TemplateExpansion {
-                file: source_name.into(),
-                source,
-            }
+        let validation_result = grammar::iter_expanded(&grammar, &self.custom_encodings, self.config.max_payload_length)
+            .and_then(|mut iter| match iter.next() {
+                Some(Err(e)) => Err(e),
+                _ => Ok(()),
+            });
+        validation_result.map_err(|source| PayloadError::TemplateExpansion {
+            file: source_name.into(),
+            source,
         })?;
 
         let category = grammar.meta.sink_category.clone();
@@ -340,7 +373,30 @@ impl PayloadDb {
     }
 
     fn validate_grammar(&self, grammar: &Grammar, source_name: &str) -> Result<(), PayloadError> {
-        let issues = validate(grammar);
+        let mut issues = validate(grammar);
+        // The free `validate()` function only knows the built-in encodings, so it
+        // downgrades an unknown transform to a Warning ("might be a custom
+        // encoding"). Here in the loader we know the registered custom encodings
+        // too, so an encoding that resolves to NEITHER a builtin NOR a registered
+        // custom transform is a hard configuration error: at expansion time
+        // `apply_encoding_dispatch` returns `Err(UnknownEncoding)`, which the
+        // `payloads()` path would otherwise SILENTLY drop (Law 10). Fail closed at
+        // the load boundary instead of losing the payload invisibly later.
+        let known_builtin = crate::encoding::BuiltinEncoding::ALL;
+        for enc in &grammar.encodings {
+            let is_builtin = known_builtin.contains(&enc.transform.as_str());
+            let is_custom = self.custom_encodings.contains_key(&enc.transform);
+            if !is_builtin && !is_custom {
+                issues.push(GrammarIssue {
+                    grammar: grammar.meta.name.clone(),
+                    level: IssueLevel::Error,
+                    message: format!(
+                        "encoding '{}' references unknown transform '{}'. Fix: use a built-in encoding or register it with `register_encoding` before loading.",
+                        enc.name, enc.transform
+                    ),
+                });
+            }
+        }
         let errors: Vec<_> = issues
             .into_iter()
             .filter(|issue| issue.level == IssueLevel::Error)
@@ -356,7 +412,8 @@ impl PayloadDb {
         }
     }
 
-    fn begin_load_session(&self) -> Result<LoadSessionGuard, PayloadError> {
+    /// Begins a load session, returning a guard that prevents concurrent loads.
+    pub fn begin_load_session(&self) -> Result<LoadSessionGuard, PayloadError> {
         self.load_in_progress
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| PayloadError::ConcurrentLoad)?;
@@ -395,13 +452,13 @@ impl PayloadDb {
             custom_encodings: &self.custom_encodings,
             deduplicate: self.config.deduplicate,
             max_per_category: self.config.max_per_category,
+            max_payload_length: self.config.max_payload_length,
             emitted: 0,
             seen_payloads: HashSet::new(),
         }
     }
 
     /// Get payload strings only (no metadata) for a category.
-    #[must_use]
     pub fn payload_strings(&mut self, category: &str) -> Vec<String> {
         self.payloads(category)
             .iter()
@@ -419,7 +476,6 @@ impl PayloadDb {
     /// Get all payloads with a taint marker injected.
     ///
     /// Marker placement is controlled by [`crate::PayloadConfig::marker_position`].
-    #[must_use]
     pub fn payloads_with_marker(&mut self, category: &str, marker: &str) -> Vec<Payload> {
         let marker_position = self.config.marker_position.clone();
         self.payloads(category)
@@ -434,18 +490,17 @@ impl PayloadDb {
                 severity: p.severity.clone(),
                 confidence: p.confidence,
                 expected_pattern: p.expected_pattern.clone(),
+                target_media_type: p.target_media_type.clone(),
             })
             .collect()
     }
 
     /// Get all categories that have been loaded.
-    #[must_use]
     pub fn categories(&self) -> Vec<&str> {
         self.iter_categories().collect()
     }
 
     /// Total number of grammars loaded.
-    #[must_use]
     pub fn grammar_count(&self) -> usize {
         self.grammars.values().map(std::vec::Vec::len).sum()
     }
@@ -459,7 +514,24 @@ impl PayloadDb {
     /// Expand all grammars for a category into payloads.
     fn expand_category(&self, category: &str) -> Vec<Payload> {
         self.iter_payloads(category)
-            .filter_map(Result::ok)
+            .filter_map(|result| match result {
+                Ok(payload) => Some(payload),
+                Err(error) => {
+                    // Law-10: a per-payload expansion failure (e.g. an
+                    // over-length payload exceeding max_payload_length) used to
+                    // vanish from the category via `filter_map(Result::ok)` with
+                    // no operator-visible signal - an invisible recall loss.
+                    // Surface it loudly before dropping so the missing payload is
+                    // diagnosable. (Unknown-encoding is already fail-closed at
+                    // load; this covers the residual length-exceeded case.)
+                    tracing::warn!(
+                        category,
+                        %error,
+                        "attackstr: dropping payload whose expansion failed"
+                    );
+                    None
+                }
+            })
             .collect()
     }
 
@@ -505,10 +577,21 @@ impl crate::PayloadSource for PayloadDb {
     }
 
     fn payload_count(&self) -> usize {
-        // Expand all categories and sum their payloads
+        // Sum each category's payload count. Reuse the cache when a category
+        // has already been expanded (the cache is invalidated on every config
+        // or grammar change, so a present entry is authoritative); only
+        // re-expand categories that were never materialized.
         self.grammars
             .keys()
-            .map(|cat| self.iter_payloads(cat).filter(|r| r.is_ok()).count())
+            .map(|cat| {
+                if let Some(cached) = self.cache.get(cat) {
+                    cached.len()
+                } else {
+                    self.iter_payloads(cat)
+                        .filter(std::result::Result::is_ok)
+                        .count()
+                }
+            })
             .sum()
     }
 }
@@ -522,9 +605,10 @@ pub struct PayloadIter<'a> {
     grammars: &'a [Grammar],
     grammar_index: usize,
     current_iter: Option<GrammarExpansionIter<'a>>,
-    custom_encodings: &'a HashMap<String, fn(&str) -> String>,
+    custom_encodings: &'a HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
     deduplicate: bool,
     max_per_category: usize,
+    max_payload_length: usize,
     emitted: usize,
     seen_payloads: HashSet<String>,
 }
@@ -565,7 +649,7 @@ impl Iterator for PayloadIter<'_> {
 
             let grammar = self.grammars.get(self.grammar_index)?;
             self.grammar_index += 1;
-            match grammar::iter_expanded(grammar, self.custom_encodings) {
+            match grammar::iter_expanded(grammar, self.custom_encodings, self.max_payload_length) {
                 Ok(iter) => self.current_iter = Some(iter),
                 Err(e) => return Some(Err(e)),
             }
@@ -579,7 +663,7 @@ where
     Hs: Hasher,
 {
     let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_by_key(|(key, _)| *key);
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
     for (key, value) in entries {
         key.hash(state);
         value.hash(state);
@@ -590,7 +674,8 @@ fn default_load_state() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
-struct LoadSessionGuard {
+/// A guard that protects against concurrent directory loads.
+pub struct LoadSessionGuard {
     flag: Arc<AtomicBool>,
 }
 
@@ -615,859 +700,6 @@ fn payload_from_expanded(
         severity: grammar.meta.severity.clone(),
         confidence: expanded_payload.confidence,
         expected_pattern: expanded_payload.expected_pattern,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn load_toml_string() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "test"
-sink_category = "test-cat"
-
-[[contexts]]
-name = "default"
-prefix = ""
-suffix = ""
-
-[[techniques]]
-name = "basic"
-template = "hello"
-
-[[encodings]]
-name = "raw"
-transform = "identity"
-"#,
-        )
-        .unwrap();
-
-        let payloads = db.payloads("test-cat");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].text, "hello");
-        assert_eq!(payloads[0].technique, "basic");
-        assert_eq!(payloads[0].context, "default");
-        assert!((payloads[0].confidence - 1.0).abs() < f64::EPSILON);
-        assert!(payloads[0].expected_pattern.is_none());
-    }
-
-    #[test]
-    fn multiple_grammars_same_category() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "a"
-sink_category = "cat"
-[[techniques]]
-name = "t1"
-template = "payload-a"
-"#,
-        )
-        .unwrap();
-        db.load_toml(
-            r#"
-[grammar]
-name = "b"
-sink_category = "cat"
-[[techniques]]
-name = "t2"
-template = "payload-b"
-"#,
-        )
-        .unwrap();
-
-        let payloads = db.payloads("cat");
-        assert_eq!(payloads.len(), 2);
-        let texts: Vec<&str> = payloads.iter().map(|p| p.text.as_str()).collect();
-        assert!(texts.contains(&"payload-a"));
-        assert!(texts.contains(&"payload-b"));
-    }
-
-    #[test]
-    fn deduplication() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            deduplicate: true,
-            ..PayloadConfig::default()
-        });
-        // Two grammars producing same payload.
-        for _ in 0..2 {
-            db.load_toml(
-                r#"
-[grammar]
-name = "dup"
-sink_category = "dup-cat"
-[[techniques]]
-name = "t"
-template = "same"
-"#,
-            )
-            .unwrap();
-        }
-
-        let payloads = db.payloads("dup-cat");
-        assert_eq!(payloads.len(), 1);
-    }
-
-    #[test]
-    fn max_per_category() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            max_per_category: 2,
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "big"
-sink_category = "big-cat"
-
-[[techniques]]
-name = "t1"
-template = "{var}"
-
-[[vars]]
-value = "a"
-[[vars]]
-value = "b"
-[[vars]]
-value = "c"
-[[vars]]
-value = "d"
-[[vars]]
-value = "e"
-"#,
-        )
-        .unwrap();
-
-        let payloads = db.payloads("big-cat");
-        assert_eq!(payloads.len(), 2); // Truncated to 2.
-    }
-
-    #[test]
-    fn exclude_categories() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            exclude_categories: vec!["blocked".into()],
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "blocked"
-sink_category = "blocked"
-[[techniques]]
-name = "t"
-template = "evil"
-"#,
-        )
-        .unwrap();
-
-        assert!(db.payloads("blocked").is_empty());
-        assert_eq!(db.grammar_count(), 0);
-    }
-
-    #[test]
-    fn include_categories() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            include_categories: vec!["allowed".into()],
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "good"
-sink_category = "allowed"
-[[techniques]]
-name = "t"
-template = "ok"
-"#,
-        )
-        .unwrap();
-        db.load_toml(
-            r#"
-[grammar]
-name = "bad"
-sink_category = "not-allowed"
-[[techniques]]
-name = "t"
-template = "nope"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(db.payloads("allowed").len(), 1);
-        assert!(db.payloads("not-allowed").is_empty());
-    }
-
-    #[test]
-    fn runtime_filter_includes_matching_grammar() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            target_runtime: Some(vec!["php".into()]),
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "php-only"
-sink_category = "runtime-cat"
-target_runtime = ["php", "node"]
-
-[[techniques]]
-name = "t"
-template = "payload"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(db.payloads("runtime-cat").len(), 1);
-    }
-
-    #[test]
-    fn runtime_filter_excludes_non_matching_grammar() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            target_runtime: Some(vec!["ruby".into()]),
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "php-only"
-sink_category = "runtime-cat"
-target_runtime = ["php", "node"]
-
-[[techniques]]
-name = "t"
-template = "payload"
-"#,
-        )
-        .unwrap();
-
-        assert!(db.payloads("runtime-cat").is_empty());
-        assert_eq!(db.grammar_count(), 0);
-    }
-
-    #[test]
-    fn runtime_filter_allows_unspecified_grammar_runtime() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            target_runtime: Some(vec!["node".into()]),
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "generic"
-sink_category = "runtime-generic"
-
-[[techniques]]
-name = "t"
-template = "payload"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(db.payloads("runtime-generic").len(), 1);
-    }
-
-    #[test]
-    fn marker_injection() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "m"
-sink_category = "mark"
-[[techniques]]
-name = "t"
-template = "alert(1)"
-"#,
-        )
-        .unwrap();
-
-        let marked = db.payloads_with_marker("mark", "SLN_42_");
-        assert_eq!(marked.len(), 1);
-        assert_eq!(marked[0].text, "SLN_42_alert(1)");
-    }
-
-    #[test]
-    fn marker_injection_suffix() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            marker_position: MarkerPosition::Suffix,
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "m"
-sink_category = "mark-suffix"
-[[techniques]]
-name = "t"
-template = "alert(1)"
-"#,
-        )
-        .unwrap();
-
-        let marked = db.payloads_with_marker("mark-suffix", "SLN_42_");
-        assert_eq!(marked[0].text, "alert(1)SLN_42_");
-    }
-
-    #[test]
-    fn iter_categories_returns_sorted_names() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "zeta"
-sink_category = "zeta"
-[[techniques]]
-name = "t"
-template = "a"
-"#,
-        )
-        .unwrap();
-        db.load_toml(
-            r#"
-[grammar]
-name = "alpha"
-sink_category = "alpha"
-[[techniques]]
-name = "t"
-template = "b"
-"#,
-        )
-        .unwrap();
-
-        let categories: Vec<_> = db.iter_categories().collect();
-        assert_eq!(categories, vec!["alpha", "zeta"]);
-    }
-
-    #[test]
-    fn config_file_round_trip_loads_grammar_dir_end_to_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let grammar_dir = dir.path().join("grammars");
-        std::fs::create_dir(&grammar_dir).unwrap();
-
-        std::fs::write(
-            grammar_dir.join("xss.toml"),
-            r#"
-[grammar]
-name = "example-xss"
-sink_category = "xss"
-
-[[contexts]]
-name = "quoted"
-prefix = "'"
-suffix = "'"
-
-[[techniques]]
-name = "alert"
-template = "{prefix}<script>{payload}</script>{suffix}"
-
-[[payloads]]
-value = "alert(1)"
-
-[[encodings]]
-name = "raw"
-transform = "identity"
-"#,
-        )
-        .unwrap();
-
-        std::fs::write(
-            dir.path().join("attackstr.toml"),
-            r#"
-max_per_category = 5
-deduplicate = true
-marker_prefix = "TRACE"
-marker_position = "replace:{MARKER}"
-grammar_dirs = ["./grammars"]
-"#,
-        )
-        .unwrap();
-
-        let (mut db, errors) =
-            PayloadDb::load_config_and_grammars(dir.path().join("attackstr.toml")).unwrap();
-        assert!(errors.is_empty(), "unexpected load errors: {errors:?}");
-
-        let payloads = db.payloads("xss");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].text, "'<script>alert(1)</script>'");
-    }
-
-    #[test]
-    fn marker_injection_inline() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            marker_position: MarkerPosition::Inline,
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "m"
-sink_category = "mark-inline"
-[[techniques]]
-name = "t"
-template = "alert(1)"
-"#,
-        )
-        .unwrap();
-
-        let marked = db.payloads_with_marker("mark-inline", "SLN_42_");
-        assert_eq!(marked[0].text, "{SLN_42_}alert(1)");
-    }
-
-    #[test]
-    fn marker_injection_replace_placeholder() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            marker_position: MarkerPosition::Replace("{MARKER}".into()),
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "m"
-sink_category = "mark-replace"
-[[techniques]]
-name = "t"
-template = "<!-- {MARKER} -->alert(1)"
-"#,
-        )
-        .unwrap();
-
-        let marked = db.payloads_with_marker("mark-replace", "SLN_42_");
-        assert_eq!(marked[0].text, "<!-- SLN_42_ -->alert(1)");
-    }
-
-    #[test]
-    fn custom_encoding() {
-        fn reverse(s: &str) -> String {
-            s.chars().rev().collect()
-        }
-
-        let mut db = PayloadDb::new();
-        db.register_encoding("reverse", reverse);
-        db.load_toml(
-            r#"
-[grammar]
-name = "enc"
-sink_category = "enc-cat"
-[[techniques]]
-name = "t"
-template = "hello"
-[[encodings]]
-name = "rev"
-transform = "reverse"
-"#,
-        )
-        .unwrap();
-
-        let payloads = db.payloads("enc-cat");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].text, "olleh");
-    }
-
-    #[test]
-    fn payload_strings_convenience() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "s"
-sink_category = "strings"
-[[techniques]]
-name = "t"
-template = "abc"
-"#,
-        )
-        .unwrap();
-
-        let strings = db.payload_strings("strings");
-        assert_eq!(strings, vec!["abc"]);
-    }
-
-    #[test]
-    fn categories_list() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "a"
-sink_category = "alpha"
-[[techniques]]
-name = "t"
-template = "x"
-"#,
-        )
-        .unwrap();
-        db.load_toml(
-            r#"
-[grammar]
-name = "b"
-sink_category = "beta"
-[[techniques]]
-name = "t"
-template = "y"
-"#,
-        )
-        .unwrap();
-
-        let mut cats = db.categories();
-        cats.sort_unstable();
-        assert_eq!(cats, vec!["alpha", "beta"]);
-    }
-
-    #[test]
-    fn clear_resets() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "c"
-sink_category = "cleared"
-[[techniques]]
-name = "t"
-template = "x"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(db.grammar_count(), 1);
-        db.clear();
-        assert_eq!(db.grammar_count(), 0);
-        assert!(db.payloads("cleared").is_empty());
-    }
-
-    #[test]
-    fn missing_category_returns_empty() {
-        let mut db = PayloadDb::new();
-        assert!(db.payloads("nonexistent").is_empty());
-    }
-
-    #[test]
-    fn load_dir_with_tempdir() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("test.toml"),
-            r#"
-[grammar]
-name = "dir-test"
-sink_category = "dir-cat"
-[[techniques]]
-name = "t"
-template = "from-dir"
-"#,
-        )
-        .unwrap();
-
-        // Non-TOML file should be skipped.
-        std::fs::write(dir.path().join("readme.txt"), "not a grammar").unwrap();
-
-        let mut db = PayloadDb::new();
-        let errors = db.load_dir(dir.path()).unwrap();
-        assert!(errors.is_empty());
-
-        assert_eq!(db.payloads("dir-cat").len(), 1);
-        assert_eq!(db.payloads("dir-cat")[0].text, "from-dir");
-    }
-
-    #[test]
-    fn load_dir_not_a_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("file.txt");
-        std::fs::write(&file, "not a dir").unwrap();
-
-        let mut db = PayloadDb::new();
-        assert!(db.load_dir(&file).is_err());
-    }
-
-    #[test]
-    fn invalid_toml_error() {
-        let mut db = PayloadDb::new();
-        let result = db.load_toml("this is not valid {{{ toml");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn load_dir_collects_errors_and_continues() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("good.toml"),
-            r#"
-[grammar]
-name = "good"
-sink_category = "dir-cat"
-[[techniques]]
-name = "t"
-template = "ok"
-"#,
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("bad.toml"), "not valid toml {{{").unwrap();
-
-        let mut db = PayloadDb::new();
-        let errors = db.load_dir(dir.path()).unwrap();
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(db.payloads("dir-cat").len(), 1);
-        assert_eq!(db.payloads("dir-cat")[0].text, "ok");
-    }
-
-    #[test]
-    fn load_dir_lenient_collects_template_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("bad-template.toml"),
-            r#"
-[grammar]
-name = "bad-template"
-sink_category = "dir-cat"
-[[techniques]]
-name = "t"
-template = "{broken"
-"#,
-        )
-        .unwrap();
-
-        let mut db = PayloadDb::new();
-        let errors = db.load_dir_lenient(dir.path()).unwrap();
-
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], PayloadError::GrammarValidation { .. }));
-        assert!(db.payloads("dir-cat").is_empty());
-    }
-
-    #[test]
-    fn load_toml_rejects_empty_technique_templates() {
-        let mut db = PayloadDb::new();
-        let error = db
-            .load_toml(
-                r#"
-[grammar]
-name = "invalid"
-sink_category = "dir-cat"
-
-[[techniques]]
-name = "blank"
-template = "   "
-"#,
-            )
-            .unwrap_err();
-
-        match error {
-            PayloadError::GrammarValidation { issues, .. } => {
-                assert!(issues
-                    .iter()
-                    .any(|issue| issue.message.contains("empty template")));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn load_dir_reports_concurrent_loads_explicitly() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = PayloadDb::new();
-        let _guard = db.begin_load_session().unwrap();
-
-        let mut db = db;
-        let error = db.load_dir_lenient(dir.path()).unwrap_err();
-        assert!(matches!(error, PayloadError::ConcurrentLoad));
-    }
-
-    #[test]
-    fn variable_expansion_with_encodings() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "ve"
-sink_category = "ve-cat"
-
-[[contexts]]
-name = "c"
-prefix = "'"
-suffix = ""
-
-[[techniques]]
-name = "t"
-template = "{prefix}OR {tautology}"
-
-[[tautologies]]
-value = "1=1"
-
-[[encodings]]
-name = "raw"
-transform = "identity"
-
-[[encodings]]
-name = "url"
-transform = "url_encode"
-"#,
-        )
-        .unwrap();
-
-        let payloads = db.payloads("ve-cat");
-        assert_eq!(payloads.len(), 2); // 1 var × 1 technique × 2 encodings
-        let texts: Vec<&str> = payloads.iter().map(|p| p.text.as_str()).collect();
-        assert!(texts.contains(&"'OR 1=1"));
-        assert!(texts.contains(&"%27OR%201%3D1"));
-    }
-
-    #[test]
-    fn payload_metadata_propagates() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "meta"
-sink_category = "meta-cat"
-severity = "high"
-cwe = "CWE-89"
-
-[[techniques]]
-name = "t"
-template = "SELECT 1"
-confidence = 0.75
-expected_pattern = "SELECT"
-"#,
-        )
-        .unwrap();
-
-        let payloads = db.payloads("meta-cat");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].severity.as_deref(), Some("high"));
-        assert_eq!(payloads[0].cwe.as_deref(), Some("CWE-89"));
-        assert!((payloads[0].confidence - 0.75).abs() < f64::EPSILON);
-        assert_eq!(payloads[0].expected_pattern.as_deref(), Some("SELECT"));
-    }
-
-    #[test]
-    fn iter_payloads_streams_category_payloads() {
-        let mut db = PayloadDb::new();
-        db.load_toml(
-            r#"
-[grammar]
-name = "stream"
-sink_category = "stream-cat"
-
-[[techniques]]
-name = "t1"
-template = "{var}"
-
-[[vars]]
-value = "a"
-[[vars]]
-value = "b"
-"#,
-        )
-        .unwrap();
-
-        let payloads: Vec<_> = db
-            .iter_payloads("stream-cat")
-            .filter_map(Result::ok)
-            .collect();
-
-        assert_eq!(payloads.len(), 2);
-        assert_eq!(payloads[0].text, "a");
-        assert_eq!(payloads[1].text, "b");
-    }
-
-    #[test]
-    fn iter_payloads_honors_deduplication_and_limits() {
-        let mut db = PayloadDb::with_config(PayloadConfig {
-            deduplicate: true,
-            max_per_category: 1,
-            ..PayloadConfig::default()
-        });
-        db.load_toml(
-            r#"
-[grammar]
-name = "stream-limit"
-sink_category = "stream-limit-cat"
-
-[[techniques]]
-name = "a"
-template = "same"
-
-[[techniques]]
-name = "b"
-template = "same"
-"#,
-        )
-        .unwrap();
-
-        let payloads: Vec<_> = db
-            .iter_payloads("stream-limit-cat")
-            .filter_map(Result::ok)
-            .collect();
-
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].text, "same");
-    }
-
-    #[test]
-    fn load_config_and_grammars_loads_relative_grammar_dirs() {
-        let root = tempfile::tempdir().unwrap();
-        let grammars_dir = root.path().join("grammars");
-        std::fs::create_dir(&grammars_dir).unwrap();
-        std::fs::write(
-            grammars_dir.join("xss.toml"),
-            r#"
-[grammar]
-name = "xss"
-sink_category = "xss"
-
-[[techniques]]
-name = "basic"
-template = "<script>alert(1)</script>"
-"#,
-        )
-        .unwrap();
-        let config_path = root.path().join("santh-payloads.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-deduplicate = true
-grammar_dirs = ["./grammars"]
-"#,
-        )
-        .unwrap();
-
-        let (mut db, errors) = PayloadDb::load_config_and_grammars(&config_path).unwrap();
-
-        assert!(errors.is_empty());
-        assert_eq!(db.payloads("xss").len(), 1);
-        assert_eq!(db.payloads("xss")[0].text, "<script>alert(1)</script>");
-    }
-
-    #[test]
-    fn load_config_and_grammars_returns_collected_grammar_errors() {
-        let root = tempfile::tempdir().unwrap();
-        let grammars_dir = root.path().join("grammars");
-        std::fs::create_dir(&grammars_dir).unwrap();
-        std::fs::write(
-            grammars_dir.join("good.toml"),
-            r#"
-[grammar]
-name = "good"
-sink_category = "cat"
-
-[[techniques]]
-name = "ok"
-template = "payload"
-"#,
-        )
-        .unwrap();
-        std::fs::write(grammars_dir.join("bad.toml"), "not valid toml {{{").unwrap();
-        let config_path = root.path().join("santh-payloads.toml");
-        std::fs::write(&config_path, "grammar_dirs = [\"./grammars\"]").unwrap();
-
-        let (mut db, errors) = PayloadDb::load_config_and_grammars(&config_path).unwrap();
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(db.payloads("cat").len(), 1);
+        target_media_type: expanded_payload.target_media_type,
     }
 }

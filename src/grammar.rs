@@ -1,10 +1,12 @@
-//! Grammar types — the TOML schema for payload definitions.
+//! Grammar types  -  the TOML schema for payload definitions.
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+use crate::encoding::EncodingError;
 
 /// A fully expanded payload candidate before it is converted into a public [`crate::Payload`].
 ///
@@ -24,6 +26,9 @@ pub struct ExpandedPayload {
     pub confidence: f64,
     /// Optional expected observer pattern for the response.
     pub expected_pattern: Option<String>,
+    /// Optional target media type for correct downstream escaping.
+    #[serde(default)]
+    pub target_media_type: Option<String>,
 }
 
 impl Eq for ExpandedPayload {}
@@ -36,6 +41,7 @@ impl Hash for ExpandedPayload {
         self.encoding.hash(state);
         self.confidence.to_bits().hash(state);
         self.expected_pattern.hash(state);
+        self.target_media_type.hash(state);
     }
 }
 
@@ -70,7 +76,7 @@ pub struct Grammar {
     /// Encoding transforms to apply to final payloads.
     #[serde(default)]
     pub encodings: Vec<Encoding>,
-    /// Variable definitions — keys are plural names (e.g. "tautologies"),
+    /// Variable definitions  -  keys are plural names (e.g. "tautologies"),
     /// values are lists of substitution values.
     #[serde(flatten)]
     pub variables: HashMap<String, Vec<Variable>>,
@@ -84,7 +90,7 @@ impl Hash for Grammar {
         self.encodings.hash(state);
 
         let mut variables: Vec<_> = self.variables.iter().collect();
-        variables.sort_by_key(|(key, _)| *key);
+        variables.sort_by(|(left, _), (right, _)| left.cmp(right));
         for (key, value) in variables {
             key.hash(state);
             value.hash(state);
@@ -106,7 +112,7 @@ impl std::fmt::Display for Grammar {
 pub struct GrammarMeta {
     /// Human-readable name (e.g. "sql-injection").
     pub name: String,
-    /// Category this grammar targets — used for lookup and filtering.
+    /// Category this grammar targets  -  used for lookup and filtering.
     pub sink_category: String,
     /// Optional description.
     #[serde(default)]
@@ -131,7 +137,7 @@ impl std::fmt::Display for GrammarMeta {
     }
 }
 
-/// An injection context — defines prefix/suffix that break out of a data context.
+/// An injection context  -  defines prefix/suffix that break out of a data context.
 ///
 /// # Thread Safety
 /// `Context` is `Send` and `Sync`.
@@ -144,6 +150,9 @@ pub struct Context {
     /// String appended after the technique payload.
     #[serde(default)]
     pub suffix: String,
+    /// Target media type for correct downstream escaping (e.g. "json_value", "url_query").
+    #[serde(default)]
+    pub target_media_type: Option<String>,
 }
 
 impl std::fmt::Display for Context {
@@ -152,7 +161,7 @@ impl std::fmt::Display for Context {
     }
 }
 
-/// An attack technique — a template string with variable placeholders.
+/// An attack technique  -  a template string with variable placeholders.
 ///
 /// Placeholders use `{var_name}` syntax. The special variables `{prefix}` and
 /// `{suffix}` are replaced with the current context's prefix/suffix.
@@ -205,7 +214,7 @@ impl std::fmt::Display for Technique {
 pub struct Encoding {
     /// Name of this encoding (e.g. "url-encode", "hex").
     pub name: String,
-    /// Transform identifier — maps to a built-in or custom encoding function.
+    /// Transform identifier  -  maps to a built-in or custom encoding function.
     pub transform: String,
 }
 
@@ -256,9 +265,22 @@ pub enum TemplateExpansionError {
         /// The limit that was exceeded.
         limit: usize,
     },
+    /// A single generated payload exceeded the maximum string length.
+    #[error("payload template expanded to a size exceeding the limit ({max_len} bytes). Fix: ensure variables do not cause exponential length growth.")]
+    ExpansionLengthExceeded {
+        /// The limit that was exceeded.
+        max_len: usize,
+    },
+    /// An encoding transform referenced by the grammar is not known.
+    #[error("unknown encoding transform '{transform}'. Fix: use a known built-in or register a custom encoding.")]
+    UnknownEncoding {
+        /// Name of the unrecognized transform.
+        transform: String,
+    },
 }
 
 const MAX_TEMPLATE_RECURSION_DEPTH: usize = 50;
+const MAX_TEMPLATE_LENGTH: usize = 262_144; // 256 KB
 
 /// Expand a grammar into a list of payload strings.
 ///
@@ -268,10 +290,11 @@ const MAX_TEMPLATE_RECURSION_DEPTH: usize = 50;
 /// Returns expanded payload records with generation metadata.
 pub fn expand(
     grammar: &Grammar,
-    custom_encodings: &HashMap<String, fn(&str) -> String>,
+    custom_encodings: &HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
+    max_payload_length: usize,
 ) -> Result<Vec<ExpandedPayload>, TemplateExpansionError> {
     let mut results = Vec::new();
-    for payload in iter_expanded(grammar, custom_encodings)? {
+    for payload in iter_expanded(grammar, custom_encodings, max_payload_length)? {
         results.push(payload?);
     }
     Ok(results)
@@ -279,14 +302,15 @@ pub fn expand(
 
 pub(crate) fn iter_expanded<'a>(
     grammar: &'a Grammar,
-    custom_encodings: &'a HashMap<String, fn(&str) -> String>,
+    custom_encodings: &'a HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
+    max_payload_length: usize,
 ) -> Result<GrammarExpansionIter<'a>, TemplateExpansionError> {
-    GrammarExpansionIter::new(grammar, custom_encodings)
+    GrammarExpansionIter::new(grammar, custom_encodings, max_payload_length)
 }
 
 pub(crate) struct GrammarExpansionIter<'a> {
     grammar: &'a Grammar,
-    custom_encodings: &'a HashMap<String, fn(&str) -> String>,
+    custom_encodings: &'a HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
     lookup: Arc<HashMap<String, Vec<String>>>,
     contexts: Vec<Cow<'a, Context>>,
     encodings: Vec<Cow<'a, Encoding>>,
@@ -298,12 +322,14 @@ pub(crate) struct GrammarExpansionIter<'a> {
     active_template: Option<String>,
     active_encoding_index: usize,
     generated_count: usize,
+    max_payload_length: usize,
 }
 
 impl<'a> GrammarExpansionIter<'a> {
     fn new(
         grammar: &'a Grammar,
-        custom_encodings: &'a HashMap<String, fn(&str) -> String>,
+        custom_encodings: &'a HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
+        max_payload_length: usize,
     ) -> Result<Self, TemplateExpansionError> {
         let lookup = Arc::new(build_variable_lookup(grammar));
         let contexts: Vec<Cow<'a, Context>> = if grammar.contexts.is_empty() {
@@ -311,6 +337,7 @@ impl<'a> GrammarExpansionIter<'a> {
                 name: "default".into(),
                 prefix: String::new(),
                 suffix: String::new(),
+                target_media_type: None,
             })]
         } else {
             grammar.contexts.iter().cloned().map(Cow::Owned).collect()
@@ -348,6 +375,7 @@ impl<'a> GrammarExpansionIter<'a> {
             active_template: None,
             active_encoding_index: 0,
             generated_count: 0,
+            max_payload_length,
         })
     }
 
@@ -400,11 +428,19 @@ impl Iterator for GrammarExpansionIter<'_> {
                     self.active_encoding_index += 1;
                     let technique = &self.grammar.techniques[self.active_technique_index];
                     let context = self.contexts[self.active_context_index].as_ref();
-                    let encoded = apply_encoding_dispatch(
+                    let encoded = match apply_encoding_dispatch(
                         template,
                         &encoding.transform,
                         self.custom_encodings,
-                    );
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    if self.max_payload_length > 0 && encoded.len() > self.max_payload_length {
+                        return Some(Err(TemplateExpansionError::ExpansionLengthExceeded {
+                            max_len: self.max_payload_length,
+                        }));
+                    }
                     self.generated_count += 1;
                     return Some(Ok(ExpandedPayload {
                         text: encoded,
@@ -413,6 +449,7 @@ impl Iterator for GrammarExpansionIter<'_> {
                         encoding: encoding.name.clone(),
                         confidence: technique.confidence,
                         expected_pattern: technique.expected_pattern.clone(),
+                        target_media_type: context.target_media_type.clone(),
                     }));
                 }
 
@@ -480,9 +517,32 @@ impl Iterator for TemplateExpansionIter {
                     max_depth: MAX_TEMPLATE_RECURSION_DEPTH,
                 }));
             }
+            if frame.prefix.len() + frame.remaining.len() > MAX_TEMPLATE_LENGTH {
+                return Some(Err(TemplateExpansionError::ExpansionLengthExceeded {
+                    max_len: MAX_TEMPLATE_LENGTH,
+                }));
+            }
             let Some(start) = frame.remaining.find('{') else {
-                return Some(Ok(format!("{}{}", frame.prefix, frame.remaining)));
+                let final_str = format!("{}{}", frame.prefix, frame.remaining).replace("}}", "}");
+                if final_str.len() > MAX_TEMPLATE_LENGTH {
+                    return Some(Err(TemplateExpansionError::ExpansionLengthExceeded {
+                        max_len: MAX_TEMPLATE_LENGTH,
+                    }));
+                }
+                return Some(Ok(final_str));
             };
+            // Escaped brace: "{{" becomes literal "{".
+            if frame.remaining[start..].starts_with("{{") {
+                let before = &frame.remaining[..start];
+                let after = &frame.remaining[start + 2..];
+                let prefix = format!("{}{before}{{", frame.prefix);
+                self.stack.push(TemplateFrame {
+                    prefix,
+                    remaining: after.to_string(),
+                    depth: frame.depth,
+                });
+                continue;
+            }
             let Some(rel_end) = frame.remaining[start..].find('}') else {
                 return Some(Err(TemplateExpansionError::UnclosedBrace {
                     template: format!("{}{}", frame.prefix, frame.remaining),
@@ -495,6 +555,9 @@ impl Iterator for TemplateExpansionIter {
             let prefix = format!("{}{before}", frame.prefix);
 
             if let Some(values) = self.lookup.get(var_name) {
+                // Push in reverse so the LIFO stack pops values in insertion
+                // order; without .rev() streaming yields expansions reversed
+                // relative to the batch expander and the grammar's var order.
                 for value in values.iter().rev() {
                     self.stack.push(TemplateFrame {
                         prefix: prefix.clone(),
@@ -507,7 +570,7 @@ impl Iterator for TemplateExpansionIter {
                 self.stack.push(TemplateFrame {
                     prefix: format!("{prefix}{literal}"),
                     remaining: after.to_string(),
-                    depth: frame.depth + 1,
+                    depth: frame.depth,
                 });
             }
         }
@@ -544,28 +607,30 @@ fn default_confidence() -> f64 {
     1.0
 }
 
-/// Apply an encoding by name — checks custom encodings first, then builtins.
+/// Apply an encoding by name  -  checks custom encodings first, then builtins.
 fn apply_encoding_dispatch(
     s: &str,
     transform: &str,
-    custom: &HashMap<String, fn(&str) -> String>,
-) -> String {
+    custom: &HashMap<String, Arc<dyn Fn(&str) -> String + Send + Sync>>,
+) -> Result<String, TemplateExpansionError> {
     if let Some(func) = custom.get(transform) {
-        return func(s);
+        return Ok(func(s));
     }
-    crate::encoding::apply_encoding(s, transform)
+    crate::encoding::apply_encoding(s, transform).map_err(|e| match e {
+        EncodingError::UnknownTransform { transform } => {
+            TemplateExpansionError::UnknownEncoding { transform }
+        }
+    })
 }
 
-#[cfg(test)]
 /// Recursively expand `{variable}` placeholders in a template string.
-pub(crate) fn expand_template(
+pub fn expand_template(
     template: String,
     lookup: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<String>, TemplateExpansionError> {
     expand_template_with_depth(template, lookup, 0)
 }
 
-#[cfg(test)]
 fn expand_template_with_depth(
     template: String,
     lookup: &HashMap<String, Vec<String>>,
@@ -576,10 +641,25 @@ fn expand_template_with_depth(
             max_depth: MAX_TEMPLATE_RECURSION_DEPTH,
         });
     }
+    if template.len() > MAX_TEMPLATE_LENGTH {
+        return Err(TemplateExpansionError::ExpansionLengthExceeded {
+            max_len: MAX_TEMPLATE_LENGTH,
+        });
+    }
 
     let Some(start) = template.find('{') else {
-        return Ok(vec![template]);
+        return Ok(vec![template.replace("}}", "}")]);
     };
+    // Escaped brace: "{{" becomes literal "{".
+    if template[start..].starts_with("{{") {
+        let before = &template[..start];
+        let after = &template[start + 2..];
+        let mut results = Vec::new();
+        for expanded_after in expand_template_with_depth(after.to_string(), lookup, depth)? {
+            results.push(format!("{before}{{{expanded_after}"));
+        }
+        return Ok(results);
+    }
     let Some(rel_end) = template[start..].find('}') else {
         return Err(TemplateExpansionError::UnclosedBrace { template });
     };
@@ -595,8 +675,8 @@ fn expand_template_with_depth(
             results.extend(expand_template_with_depth(new_template, lookup, depth + 1)?);
         }
     } else {
-        // Unknown variable — preserve placeholder, continue expanding `after`.
-        for expanded_after in expand_template_with_depth(after.to_string(), lookup, depth + 1)? {
+        // Unknown variable  -  preserve placeholder, continue expanding `after`.
+        for expanded_after in expand_template_with_depth(after.to_string(), lookup, depth)? {
             results.push(format!("{before}{{{var_name}}}{expanded_after}"));
         }
     }
@@ -605,244 +685,18 @@ fn expand_template_with_depth(
 
 /// Simple depluralization for variable name matching.
 ///
-/// "tautologies" → "tautology", "comments" → "comment", "vars" → "var"
-pub(crate) fn depluralize(s: &str) -> String {
+/// "tautologies" → "tautology", "comments" → "comment", "vars" → "var",
+/// "bypasses" → "bypass" (double-s plurals drop the "es", not just the "s").
+pub fn depluralize(s: &str) -> String {
     if s.ends_with("ies") && s.len() > 3 {
         format!("{}y", &s[..s.len() - 3])
+    } else if s.ends_with("sses") && s.len() > 4 {
+        // "-sses" plurals ("bypasses", "classes", "passes") drop "es" to keep
+        // the doubled "s"; the plain "-s" rule would leave a stray "e".
+        s[..s.len() - 2].to_string()
     } else if s.ends_with('s') && s.len() > 1 {
         s[..s.len() - 1].to_string()
     } else {
         s.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expand_template_basic() {
-        let mut lookup = HashMap::new();
-        lookup.insert("tautology".to_string(), vec!["1=1".into(), "2>1".into()]);
-        lookup.insert("comment".to_string(), vec!["--".into(), "#".into()]);
-
-        let res = expand_template("OR {tautology}{comment}".into(), &lookup).unwrap();
-        assert_eq!(res.len(), 4);
-        assert!(res.contains(&"OR 1=1--".into()));
-        assert!(res.contains(&"OR 2>1#".into()));
-    }
-
-    #[test]
-    fn expand_template_no_vars() {
-        let lookup = HashMap::new();
-        let res = expand_template("static content".into(), &lookup).unwrap();
-        assert_eq!(res, vec!["static content"]);
-    }
-
-    #[test]
-    fn expand_template_missing_var() {
-        let mut lookup = HashMap::new();
-        lookup.insert("a".into(), vec!["X".into()]);
-
-        let res = expand_template("{a}:{missing}".into(), &lookup).unwrap();
-        assert_eq!(res, vec!["X:{missing}"]);
-    }
-
-    #[test]
-    fn expand_template_preserves_marker_placeholder() {
-        let lookup = HashMap::new();
-        let res = expand_template("<!-- {MARKER} -->".into(), &lookup).unwrap();
-        assert_eq!(res, vec!["<!-- {MARKER} -->"]);
-    }
-
-    #[test]
-    fn expand_template_preserves_unknown_braces() {
-        let lookup = HashMap::new();
-        let res = expand_template("function() { return 1; }".into(), &lookup).unwrap();
-        assert_eq!(res, vec!["function() { return 1; }"]);
-    }
-
-    #[test]
-    fn expand_template_nested() {
-        let mut lookup = HashMap::new();
-        lookup.insert("inner".into(), vec!["X".into()]);
-        lookup.insert("outer".into(), vec!["{inner}".into()]);
-
-        let res = expand_template("{outer}".into(), &lookup).unwrap();
-        assert_eq!(res, vec!["X"]);
-    }
-
-    #[test]
-    fn expand_template_unclosed_brace_errors() {
-        let lookup = HashMap::new();
-        let err = expand_template("prefix {broken".into(), &lookup).unwrap_err();
-        assert!(matches!(err, TemplateExpansionError::UnclosedBrace { .. }));
-    }
-
-    #[test]
-    fn expand_template_recursion_limit_errors() {
-        let mut lookup = HashMap::new();
-        lookup.insert("loop".into(), vec!["{loop}".into()]);
-
-        let err = expand_template("{loop}".into(), &lookup).unwrap_err();
-        assert!(matches!(
-            err,
-            TemplateExpansionError::RecursionLimitExceeded { max_depth: 50 }
-        ));
-    }
-
-    #[test]
-    fn depluralize_cases() {
-        assert_eq!(depluralize("tautologies"), "tautology");
-        assert_eq!(depluralize("comments"), "comment");
-        assert_eq!(depluralize("vars"), "var");
-        assert_eq!(depluralize("s"), "s"); // too short
-        assert_eq!(depluralize("ssrf_targets"), "ssrf_target");
-    }
-
-    #[test]
-    fn expand_grammar_cartesian() {
-        let mut vars = HashMap::new();
-        vars.insert(
-            "vars".to_string(),
-            vec![
-                Variable { value: "A".into() },
-                Variable { value: "B".into() },
-                Variable { value: "C".into() },
-            ],
-        );
-
-        let grammar = Grammar {
-            meta: GrammarMeta {
-                name: "test".into(),
-                sink_category: "test".into(),
-                description: None,
-                tags: vec![],
-                severity: None,
-                cwe: None,
-                target_runtime: None,
-            },
-            contexts: vec![Context {
-                name: "c1".into(),
-                prefix: String::new(),
-                suffix: String::new(),
-            }],
-            techniques: vec![
-                Technique {
-                    name: "t1".into(),
-                    template: "{var}".into(),
-                    tags: vec![],
-                    confidence: 1.0,
-                    expected_pattern: None,
-                },
-                Technique {
-                    name: "t2".into(),
-                    template: "X{var}Y".into(),
-                    tags: vec![],
-                    confidence: 1.0,
-                    expected_pattern: None,
-                },
-            ],
-            encodings: vec![
-                Encoding {
-                    name: "raw".into(),
-                    transform: "identity".into(),
-                },
-                Encoding {
-                    name: "url".into(),
-                    transform: "url_encode".into(),
-                },
-            ],
-            variables: vars,
-        };
-
-        let custom = HashMap::new();
-        let payloads = expand(&grammar, &custom).unwrap();
-        // 3 vars × 2 techniques × 2 encodings = 12
-        assert_eq!(payloads.len(), 12);
-    }
-
-    #[test]
-    fn expand_grammar_defaults() {
-        let grammar = Grammar {
-            meta: GrammarMeta {
-                name: "test".into(),
-                sink_category: "test".into(),
-                description: None,
-                tags: vec![],
-                severity: None,
-                cwe: None,
-                target_runtime: None,
-            },
-            contexts: vec![], // uses default
-            techniques: vec![Technique {
-                name: "t1".into(),
-                template: "hello".into(),
-                tags: vec![],
-                confidence: 1.0,
-                expected_pattern: None,
-            }],
-            encodings: vec![], // uses default
-            variables: HashMap::new(),
-        };
-
-        let custom = HashMap::new();
-        let payloads = expand(&grammar, &custom).unwrap();
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].text, "hello");
-    }
-
-    #[test]
-    fn expand_grammar_empty_techniques() {
-        let grammar = Grammar {
-            meta: GrammarMeta {
-                name: "empty".into(),
-                sink_category: "empty".into(),
-                description: None,
-                tags: vec![],
-                severity: None,
-                cwe: None,
-                target_runtime: None,
-            },
-            contexts: vec![],
-            techniques: vec![],
-            encodings: vec![],
-            variables: HashMap::new(),
-        };
-
-        let custom = HashMap::new();
-        let payloads = expand(&grammar, &custom).unwrap();
-        assert!(payloads.is_empty());
-    }
-
-    #[test]
-    fn expand_propagates_technique_metadata() {
-        let grammar = Grammar {
-            meta: GrammarMeta {
-                name: "meta".into(),
-                sink_category: "meta".into(),
-                description: None,
-                tags: vec![],
-                severity: Some("high".into()),
-                cwe: Some("CWE-79".into()),
-                target_runtime: None,
-            },
-            contexts: vec![],
-            techniques: vec![Technique {
-                name: "t1".into(),
-                template: "alert(1)".into(),
-                tags: vec![],
-                confidence: 0.42,
-                expected_pattern: Some("alert".into()),
-            }],
-            encodings: vec![],
-            variables: HashMap::new(),
-        };
-
-        let custom = HashMap::new();
-        let payloads = expand(&grammar, &custom).unwrap();
-        assert_eq!(payloads.len(), 1);
-        assert!((payloads[0].confidence - 0.42).abs() < f64::EPSILON);
-        assert_eq!(payloads[0].expected_pattern.as_deref(), Some("alert"));
     }
 }

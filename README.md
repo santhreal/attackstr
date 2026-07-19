@@ -1,6 +1,12 @@
 # attackstr
 
+Part of [Santh](https://santh.dev) - open source Rust security and infrastructure tooling. Follow [@SanthProject](https://x.com/SanthProject) on X.
+
 Generate attack strings from TOML grammars. You define contexts, techniques, variables, and encodings in a TOML file. attackstr expands them into every combination and hands you back structured payloads with metadata.
+
+```bash
+cargo add attackstr
+```
 
 ```rust
 use attackstr::PayloadDb;
@@ -115,7 +121,7 @@ Pull requests are welcome. There is no such thing as a perfect crate. If you fin
 
 ## License
 
-MIT. Copyright 2026 CORUM COLLECTIVE LLC.
+MIT. Copyright 2026 CORUM COLLECTIVE LLC. Contact: contact@santh.dev
 
 [![crates.io](https://img.shields.io/crates/v/attackstr.svg)](https://crates.io/crates/attackstr)
 [![docs.rs](https://docs.rs/attackstr/badge.svg)](https://docs.rs/attackstr)

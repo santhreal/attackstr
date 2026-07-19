@@ -4,28 +4,72 @@ name = "attackstr"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
-license = "MIT"
-authors = ["Corum Collective LLC <engineering@corumcollective.com>"]
-repository = "https://github.com/santhsecurity/attackstr"
-description = "Grammar-based security payload generation — TOML-driven, composable, encoding-aware"
+license = "MIT OR Apache-2.0"
+authors = ["Santh Project <contact@santh.dev>"]
+repository = "https://github.com/santhreal/attackstr"
+homepage = "https://santh.dev"
+description = "Grammar-based security payload generation  -  TOML-driven, composable, encoding-aware"
 readme = "README.md"
 keywords = ["security", "payloads", "fuzzing", "pentest", "vulnerability"]
 categories = ["development-tools::testing"]
 
 [features]
 default = []
-# Reserve support for compiled-in grammar bundles.
-# This feature is currently a no-op in this crate version until embedded
-# grammars are added, so enabling it is forward-compatible but has no effect.
-builtin-grammars = []
+# Gates real exploit proof-of-concept strings in ports/ and examples.
+# Enabling this feature ships working attack payloads.
+exploits = []
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-urlencoding = "2"
-thiserror = "2"
-tracing = "0.1"
+serde = { version = "=1.0.228", features = ["derive"] }
+toml = "=0.8.23"
+urlencoding = "=2.1.3"
+thiserror = "=2.0.18"
+tracing = "=0.1.44"
+encodex = { path = "../../performance/compression/encodex" }
 
 [dev-dependencies]
-tempfile = "3"
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
+proptest = "=1.9.0"
+tempfile = "=3.27.0"
+tracing-subscriber = { version = "=0.3.23", features = ["fmt"] }
+
+[[test]]
+name = "unit_tests"
+path = "tests/unit/mod.rs"
+
+[[test]]
+name = "adversarial_tests"
+path = "tests/adversarial/mod.rs"
+
+[[test]]
+name = "concurrent_tests"
+path = "tests/concurrent/mod.rs"
+
+[[test]]
+name = "property_tests"
+path = "tests/property/mod.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration/mod.rs"
+
+[[test]]
+name = "regression_tests"
+path = "tests/regression/mod.rs"
+
+[[example]]
+name = "basic"
+required-features = ["exploits"]
+
+[[example]]
+name = "custom_encoding"
+
+[[example]]
+name = "mutations"
+
+[[example]]
+name = "toml_config"
+required-features = ["exploits"]
+
+[[test]]
+name = "break_it"
+path = "tests/break_it.rs"

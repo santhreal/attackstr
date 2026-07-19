@@ -16,8 +16,13 @@ fn main() {
     }
 
     println!("encoding mix mutations:");
-    for variant in mutate_encoding_mix(payload, &["url_encode", "unicode", "html_entities"]) {
-        println!("  {variant}");
+    match mutate_encoding_mix(payload, &["url_encode", "unicode", "html_entities"]) {
+        Ok(variants) => {
+            for variant in variants {
+                println!("  {variant}");
+            }
+        }
+        Err(e) => eprintln!("encoding error: {e}"),
     }
 
     println!("sql comment mutations:");
@@ -26,7 +31,12 @@ fn main() {
     }
 
     println!("all mutations:");
-    for variant in mutate_all("<script>alert(1)</script>").into_iter().take(10) {
-        println!("  {variant}");
+    match mutate_all("<script>alert(1)</script>") {
+        Ok(variants) => {
+            for variant in variants.into_iter().take(10) {
+                println!("  {variant}");
+            }
+        }
+        Err(e) => eprintln!("encoding error: {e}"),
     }
 }
