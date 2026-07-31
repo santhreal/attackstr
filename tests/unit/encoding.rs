@@ -32,6 +32,22 @@ fn unicode_encoding() {
     assert_eq!(apply_encoding("AB", "unicode").unwrap(), "\\u0041\\u0042");
 }
 
+/// Locks out output drift in `octal_escape` after the `write!`/`expect` sink
+/// rewrite: octal escapes must stay zero-padded three-digit backslash-octal.
+#[test]
+fn octal_encoding_exact_output() {
+    assert_eq!(apply_encoding("AB", "octal").unwrap(), "\\101\\102");
+    assert_eq!(apply_encoding("\u{0}\u{7}", "octal").unwrap(), "\\000\\007");
+}
+
+/// Locks out output drift in `css_escape` after the `write!`/`expect` sink
+/// rewrite: every char must become a backslash-hex escape of its code point.
+#[test]
+fn css_escape_encoding_exact_output() {
+    assert_eq!(apply_encoding("AB", "css_escape").unwrap(), "\\41\\42");
+    assert_eq!(apply_encoding("é", "css_escape").unwrap(), "\\e9");
+}
+
 #[test]
 fn html_entities() {
     assert_eq!(

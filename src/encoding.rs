@@ -204,7 +204,8 @@ fn percent_hex_encode(s: &str) -> String {
     s.bytes()
         .fold(String::with_capacity(s.len() * 3), |mut acc, b| {
             use std::fmt::Write;
-            write!(&mut acc, "%{b:02x}").expect("writing to a String sink is infallible");
+            // Writing to a String sink is infallible.
+            let _ = write!(&mut acc, "%{b:02x}");
             acc
         })
 }
@@ -219,10 +220,10 @@ fn unicode_escape(s: &str) -> String {
                 let code = u - 0x1_0000;
                 let high = 0xD800 + (code >> 10);
                 let low = 0xDC00 + (code & 0x3FF);
-                write!(&mut acc, "\\u{:04x}\\u{:04x}", high, low)
-                    .expect("writing to a String sink is infallible");
+                let _ = write!(&mut acc, "\\u{:04x}\\u{:04x}", high, low);
             } else {
-                write!(&mut acc, "\\u{:04x}", u).expect("writing to a String sink is infallible");
+                // Writing to a String sink is infallible.
+                let _ = write!(&mut acc, "\\u{:04x}", u);
             }
             acc
         })
@@ -232,7 +233,8 @@ fn octal_escape(s: &str) -> String {
     s.bytes()
         .fold(String::with_capacity(s.len() * 4), |mut acc, b| {
             use std::fmt::Write;
-            write!(&mut acc, "\\{b:03o}").expect("writing to a String sink is infallible");
+            // Writing to a String sink is infallible.
+            let _ = write!(&mut acc, "\\{b:03o}");
             acc
         })
 }
@@ -321,7 +323,8 @@ fn css_escape(s: &str) -> String {
     s.chars()
         .fold(String::with_capacity(s.len() * 6), |mut acc, c| {
             use std::fmt::Write;
-            write!(&mut acc, "\\{:02x}", c as u32).expect("writing to a String sink is infallible");
+            // Writing to a String sink is infallible.
+            let _ = write!(&mut acc, "\\{:02x}", c as u32);
             acc
         })
 }

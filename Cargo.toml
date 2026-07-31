@@ -1,7 +1,7 @@
 [package]
 exclude = ["target/"]
 name = "attackstr"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ repository = "https://github.com/santhreal/attackstr"
 homepage = "https://santh.dev"
 description = "Grammar-based security payload generation  -  TOML-driven, composable, encoding-aware"
 readme = "README.md"
-keywords = ["security", "payloads", "fuzzing", "pentest", "vulnerability"]
+keywords = ["security", "payloads", "payload-generation", "fuzzing", "pentest"]
 categories = ["development-tools::testing"]
 
 [features]
@@ -25,7 +25,7 @@ toml = "=0.8.23"
 urlencoding = "=2.1.3"
 thiserror = "=2.0.18"
 tracing = "=0.1.44"
-encodex = { version = "0.1.0" }
+encodex = { version = "0.1.13" }
 
 [dev-dependencies]
 proptest = "=1.9.0"
