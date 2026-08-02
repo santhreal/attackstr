@@ -309,3 +309,33 @@ mod roundtrip_tests {
         }
     }
 }
+
+/// ONE-PLACE guard for the encoding-name set: `BuiltinEncoding::ALL` (used by
+/// load-time validation to fail closed on unknown transforms) and the
+/// `FromStr` dispatch behind `apply_encoding` must agree in both directions,
+/// so adding a name to one side without the other fails loudly here.
+#[test]
+fn all_and_dispatch_are_bidirectionally_complete() {
+    use std::str::FromStr;
+    for name in BuiltinEncoding::ALL {
+        // Every listed name parses and applies.
+        let variant = BuiltinEncoding::from_str(name)
+            .unwrap_or_else(|_| panic!("ALL entry {name} does not parse"));
+        apply_encoding("probe", name)
+            .unwrap_or_else(|_| panic!("ALL entry {name} does not apply"));
+        // Every parsed name's canonical form round-trips to the same variant
+        // and is itself listed.
+        assert_eq!(
+            BuiltinEncoding::from_str(&variant.to_string()).as_ref(),
+            Ok(&variant),
+            "canonical name of {variant} does not round-trip"
+        );
+        assert!(
+            BuiltinEncoding::ALL.contains(&variant.to_string().as_str()),
+            "canonical name of {variant} missing from ALL"
+        );
+    }
+    // Unknown names still fail closed through the same path.
+    assert!(BuiltinEncoding::from_str("not_an_encoding").is_err());
+    assert!(apply_encoding("probe", "not_an_encoding").is_err());
+}

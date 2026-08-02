@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::encoding::{apply_encoding, EncodingError};
+use crate::encoding::{alternate_case, apply_encoding, EncodingError};
 
 /// Generate case-mutated variants of a payload.
 pub fn mutate_case(payload: &str) -> Vec<String> {
@@ -156,30 +156,58 @@ pub fn mutate_html(payload: &str) -> Vec<String> {
         variants.push(payload.replace('=', "\n=\n"));
     }
 
-    // Forward slash insertion in common tags.
+    // Forward slash insertion in common tags. Only the matched tag span is
+    // rewritten: the payload body must stay byte-for-byte intact, because JS
+    // identifiers are case-sensitive and lowercasing the whole payload (the
+    // old behavior) silently emitted non-functional variants.
     let tags = [
         "script", "img", "svg", "body", "iframe", "object", "embed", "math", "a", "form",
     ];
     for tag in tags {
-        let lower_tag = format!("<{tag}");
-        if payload.to_lowercase().contains(&lower_tag) {
-            let mixed_tag = format!("<{}", alternate_case(tag, 1));
-            variants.push(payload.to_lowercase().replace(&lower_tag, &mixed_tag));
-            // Randomly insert slashes and alternate case for the tag
-            variants.push(
-                payload
-                    .to_lowercase()
-                    .replace(&lower_tag, &format!("<{tag}/")),
-            );
-            variants.push(
-                payload
-                    .to_lowercase()
-                    .replace(&lower_tag, &format!("<{tag}    ")),
-            );
+        let mixed_tag = format!("<{}", alternate_case(tag, 1));
+        if let Some(variant) = replace_tag_span(payload, tag, &mixed_tag) {
+            variants.push(variant);
+        }
+        if let Some(variant) = replace_tag_span(payload, tag, &format!("<{tag}/")) {
+            variants.push(variant);
+        }
+        if let Some(variant) = replace_tag_span(payload, tag, &format!("<{tag}    ")) {
+            variants.push(variant);
         }
     }
 
     collect_unique(variants)
+}
+
+/// Replace every case-insensitive occurrence of `<{tag}` in `payload` with
+/// `replacement`, leaving the rest of the payload byte-for-byte intact.
+/// Returns `None` when the tag does not occur.
+fn replace_tag_span(payload: &str, tag: &str, replacement: &str) -> Option<String> {
+    let span = 1 + tag.len(); // "<" + tag; both ASCII
+    let bytes = payload.as_bytes();
+    let mut out = String::with_capacity(payload.len());
+    let mut last = 0;
+    let mut i = 0;
+    let mut replaced = false;
+    while i + span <= bytes.len() {
+        // b'<' is ASCII, so a match index is always a char boundary; the tag
+        // comparison via `get` safely rejects spans split by multi-byte chars.
+        if bytes[i] == b'<'
+            && payload
+                .get(i + 1..i + span)
+                .is_some_and(|s| s.eq_ignore_ascii_case(tag))
+        {
+            out.push_str(&payload[last..i]);
+            out.push_str(replacement);
+            i += span;
+            last = i;
+            replaced = true;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&payload[last..]);
+    replaced.then_some(out)
 }
 
 /// Generate unicode normalization bypass variants.
@@ -248,22 +276,6 @@ pub fn mutate_all(payload: &str) -> Result<Vec<String>, EncodingError> {
     variants.extend(mutate_unicode(payload));
     Ok(collect_unique(variants))
 }
-
-fn alternate_case(payload: &str, offset: usize) -> String {
-    // Push into one pre-sized buffer instead of allocating a `String` per char.
-    let mut out = String::with_capacity(payload.len());
-    for (idx, ch) in payload.chars().enumerate() {
-        if !ch.is_ascii_alphabetic() {
-            out.push(ch);
-        } else if (idx + offset) % 2 == 0 {
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch.to_ascii_uppercase());
-        }
-    }
-    out
-}
-
 
 fn collect_unique<I>(variants: I) -> Vec<String>
 where

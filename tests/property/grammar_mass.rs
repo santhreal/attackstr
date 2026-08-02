@@ -1,12 +1,11 @@
 //! Mass grammar / encoding property tests (S-proptest-02).
 
 use attackstr::{
-    apply_encoding, depluralize, expand, expand_template, validate, BuiltinEncoding, Context,
-    Encoding, Grammar, GrammarMeta, Technique, Variable,
+    apply_encoding, expand, expand_template, validate, Context, Encoding, Grammar, GrammarMeta,
+    Technique, Variable,
 };
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn minimal_grammar(name: &str, category: &str, template: &str) -> Grammar {
     Grammar {

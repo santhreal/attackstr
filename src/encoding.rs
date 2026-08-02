@@ -155,49 +155,10 @@ impl std::fmt::Display for CustomEncoder {
 /// assert_eq!(apply_encoding("a b", "url").unwrap(), "a%20b");
 /// ```
 pub fn apply_encoding(s: &str, transform: &str) -> Result<String, EncodingError> {
-    apply_url_encoding(s, transform)
-        .or_else(|| apply_char_encoding(s, transform))
-        .or_else(|| apply_format_encoding(s, transform))
-        .ok_or_else(|| EncodingError::UnknownTransform {
-            transform: transform.to_string(),
-        })
-}
-
-fn apply_url_encoding(s: &str, transform: &str) -> Option<String> {
-    match transform {
-        "identity" | "raw" => Some(s.to_string()),
-        "url_encode" | "url" => Some(urlencoding::encode(s).into_owned()),
-        "double_url" => Some(urlencoding::encode(&urlencoding::encode(s)).into_owned()),
-        "hex" => Some(percent_hex_encode(s)),
-        "unicode" => Some(unicode_escape(s)),
-        "html_entities" | "html" => Some(html_encode(s)),
-        "null_byte" => Some(format!("{s}%00")),
-        "base64" => Some(encodex::base64::encode(s.as_bytes())),
-        "octal" => Some(octal_escape(s)),
-        _ => None,
-    }
-}
-
-fn apply_char_encoding(s: &str, transform: &str) -> Option<String> {
-    match transform {
-        "charcode" | "js_charcode" => Some(js_charcode(s)),
-        "concat_split" | "js_concat" => Some(js_concat_split(s)),
-        "case_alternate" => Some(alternate_case(s)),
-        "tab_split" => Some(join_chars_with(s, "\t")),
-        "newline_split" => Some(join_chars_with(s, "\n")),
-        _ => None,
-    }
-}
-
-fn apply_format_encoding(s: &str, transform: &str) -> Option<String> {
-    match transform {
-        "php_chr" => Some(php_chr_concat(s)),
-        "python_chr" => Some(python_chr_join(s)),
-        "sql_char" => Some(sql_char_concat(s)),
-        "css_escape" => Some(css_escape(s)),
-        "rot13" => Some(rot13_encode(s)),
-        _ => None,
-    }
+    // The `BuiltinEncoding` enum is the single owner of the encoding-name set:
+    // parsing resolves the name (canonical or alias) and `apply` dispatches.
+    let encoding: BuiltinEncoding = transform.parse()?;
+    Ok(encoding.apply(s))
 }
 
 fn percent_hex_encode(s: &str) -> String {
@@ -263,13 +224,17 @@ fn js_concat_split(s: &str) -> String {
     parts.join("+")
 }
 
-fn alternate_case(s: &str) -> String {
+/// Alternating-case transform, Unicode-aware, keyed on char index plus
+/// `offset`. The single owner for both the `case_alternate` encoding and the
+/// `mutate_case`/tag-casing mutation paths; `offset` 0 lowercases even
+/// indices, `offset` 1 uppercases them.
+pub(crate) fn alternate_case(s: &str, offset: usize) -> String {
     // Build in one buffer instead of allocating a `String` per char. Keeps the
     // Unicode-aware case mapping (`char::to_lowercase`/`to_uppercase` can yield
     // more than one char, e.g. 'İ'), so the result is byte-identical.
     let mut out = String::with_capacity(s.len());
     for (i, c) in s.chars().enumerate() {
-        if i % 2 == 0 {
+        if (i + offset) % 2 == 0 {
             out.extend(c.to_lowercase());
         } else {
             out.extend(c.to_uppercase());
@@ -403,7 +368,71 @@ impl std::fmt::Display for BuiltinEncoding {
     }
 }
 
+impl std::str::FromStr for BuiltinEncoding {
+    type Err = EncodingError;
+
+    /// Resolve an encoding name (canonical or alias) to its variant.
+    ///
+    /// This is the single owner of the encoding-name set: `apply_encoding`
+    /// dispatches through it, and [`BuiltinEncoding::ALL`] is validated
+    /// against it by the bidirectional completeness test.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let variant = match name {
+            "identity" | "raw" => Self::Identity,
+            "url_encode" | "url" => Self::UrlEncode,
+            "double_url" => Self::DoubleUrl,
+            "hex" => Self::Hex,
+            "unicode" => Self::Unicode,
+            "html_entities" | "html" => Self::HtmlEntities,
+            "null_byte" => Self::NullByte,
+            "base64" => Self::Base64,
+            "octal" => Self::Octal,
+            "charcode" | "js_charcode" => Self::JsCharCode,
+            "concat_split" | "js_concat" => Self::JsConcat,
+            "case_alternate" => Self::CaseAlternate,
+            "tab_split" => Self::TabSplit,
+            "newline_split" => Self::NewlineSplit,
+            "php_chr" => Self::PhpChr,
+            "python_chr" => Self::PythonChr,
+            "sql_char" => Self::SqlChar,
+            "css_escape" => Self::CssEscape,
+            "rot13" => Self::Rot13,
+            other => {
+                return Err(EncodingError::UnknownTransform {
+                    transform: other.to_string(),
+                })
+            }
+        };
+        Ok(variant)
+    }
+}
+
 impl BuiltinEncoding {
+    /// Apply this encoding to `s`.
+    fn apply(self, s: &str) -> String {
+        match self {
+            Self::Identity => s.to_string(),
+            Self::UrlEncode => urlencoding::encode(s).into_owned(),
+            Self::DoubleUrl => urlencoding::encode(&urlencoding::encode(s)).into_owned(),
+            Self::Hex => percent_hex_encode(s),
+            Self::Unicode => unicode_escape(s),
+            Self::HtmlEntities => html_encode(s),
+            Self::NullByte => format!("{s}%00"),
+            Self::Base64 => encodex::base64::encode(s.as_bytes()),
+            Self::Octal => octal_escape(s),
+            Self::JsCharCode => js_charcode(s),
+            Self::JsConcat => js_concat_split(s),
+            Self::CaseAlternate => alternate_case(s, 0),
+            Self::TabSplit => join_chars_with(s, "\t"),
+            Self::NewlineSplit => join_chars_with(s, "\n"),
+            Self::PhpChr => php_chr_concat(s),
+            Self::PythonChr => python_chr_join(s),
+            Self::SqlChar => sql_char_concat(s),
+            Self::CssEscape => css_escape(s),
+            Self::Rot13 => rot13_encode(s),
+        }
+    }
+
     /// All builtin encoding names as strings.
     pub const ALL: &'static [&'static str] = &[
         "identity",

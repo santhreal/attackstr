@@ -197,3 +197,72 @@ fn encoding_mix_single_char() {
         .unwrap()
         .is_empty());
 }
+
+/// Regression for the mutate_html body-corruption bug: the tag-mutation
+/// branch used to build variants from `payload.to_lowercase()`, silently
+/// rewriting the JS body (`ALERT` -> `alert`), which emits a non-functional
+/// payload because JS identifiers are case-sensitive. Only the matched tag
+/// span may change; the body must stay byte-for-byte intact.
+#[test]
+fn html_tag_mutation_preserves_payload_body_case() {
+    let variants = mutate_html("<script>ALERT(1)</script>");
+    // The tag-span mutations exist...
+    assert!(
+        variants.iter().any(|v| v == "<ScRiPt>ALERT(1)</script>"),
+        "mixed-case tag variant with verbatim body missing: {variants:?}"
+    );
+    assert!(
+        variants.iter().any(|v| v == "<script/>ALERT(1)</script>"),
+        "slash-insertion variant with verbatim body missing: {variants:?}"
+    );
+    assert!(
+        variants.iter().any(|v| v == "<script    >ALERT(1)</script>"),
+        "space-insertion variant with verbatim body missing: {variants:?}"
+    );
+}
+
+/// The tag lookup is case-insensitive, so an uppercase `<SCRIPT>` in the
+/// original payload is still perturbed, without touching anything else.
+#[test]
+fn html_tag_mutation_matches_tags_case_insensitively() {
+    let variants = mutate_html("<SCRIPT>Alert(1)</SCRIPT>");
+    assert!(
+        variants.iter().any(|v| v == "<ScRiPt>Alert(1)</SCRIPT>"),
+        "case-insensitive tag match missing: {variants:?}"
+    );
+    // The closing tag and body are never rewritten by the tag branch.
+    assert!(
+        variants
+            .iter()
+            .filter(|v| v.starts_with("<ScRiPt>") || v.contains("/>") || v.contains("    >"))
+            .all(|v| v.ends_with("</SCRIPT>")),
+        "closing tag was corrupted: {variants:?}"
+    );
+}
+
+/// Every occurrence of the tag is rewritten (the old `str::replace` semantics
+/// are preserved), and a payload without the tag yields no tag variants.
+#[test]
+fn html_tag_mutation_rewrites_all_occurrences() {
+    let variants = mutate_html("<script><script>x");
+    assert!(
+        variants.iter().any(|v| v == "<ScRiPt><ScRiPt>x"),
+        "second occurrence was not rewritten: {variants:?}"
+    );
+}
+
+/// The `case_alternate` encoding and the `mutate_case` mutation share one
+/// `alternate_case` owner; they must agree on non-ASCII input so a maintainer
+/// editing one cannot drift from the other.
+#[test]
+fn alternate_case_encoding_and_mutation_agree_on_non_ascii() {
+    // 'é' is a non-ASCII alphabetic char: the unified Unicode-aware owner
+    // case-mixes it (é -> É at odd indices) instead of passing it verbatim.
+    let encoded = apply_encoding("héllo", "case_alternate").unwrap();
+    let mutated = mutate_case("héllo");
+    assert_eq!(encoded, "hÉlLo");
+    assert!(
+        mutated.iter().any(|v| v == &encoded),
+        "mutate_case must include the encoding-identical variant: {mutated:?}"
+    );
+}

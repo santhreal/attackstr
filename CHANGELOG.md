@@ -1,14 +1,14 @@
 # Changelog
 
-## v0.2.1
+All notable changes to this project are documented in this file. The format follows Keep a Changelog and the crate adheres to Semantic Versioning.
 
-- Fixed: replaced `expect()` on infallible `write!` calls into `String` sinks in `percent_hex_encode`, `unicode_escape`, `octal_escape`, and `css_escape`, clearing the crate's own `deny(clippy::expect_used)` gate.
-- Added regression tests locking the exact output of the `octal` and `css_escape` transforms.
-- Verified building and testing against encodex 0.1.13, which restores the `encodex::base64::encode` dependency (SD-021); the path dependency now pins `version = "0.1.13"` so a future publish resolves encodex from crates.io.
+## [0.2.2] - 2026-08-02
 
-## v0.2.0
+### Fixed
+- `mutate_html` no longer lowercases the entire payload body in its tag-mutation branch. Only the matched tag span is rewritten (case-insensitive match, replace-all preserved), so payloads with case-sensitive JavaScript keep working.
+- Unified the two divergent `alternate_case` implementations into one Unicode-aware helper; the encoding and mutate paths now agree on non-ASCII input.
+- Consolidated the triplicated encoding-name set into one `FromStr` dispatch; unknown encoding names fail closed.
 
-- Added `#[non_exhaustive]` to extensible public enums such as `MarkerPosition`, `TemplateExpansionError`, `IssueLevel`, `BuiltinEncoding`, and `PayloadError`.
-- Added `Display` implementations for developer-facing public types including `PayloadDb`, `Grammar`, `ExpandedPayload`, `Payload`, `PayloadConfig`, and related helper types.
-- Added `# Thread Safety` sections across the public API to state whether each type is `Send`, `Sync`, or implementation-defined.
-- Added `#[must_use]` to important constructors and value-returning APIs that are easy to ignore by accident.
+## [0.2.1] - 2026-07-30
+
+- Published release: refined metadata, docs, and tests for the crates.io train.
