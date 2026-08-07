@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file. The format follows Keep a Changelog and the crate adheres to Semantic Versioning.
 
+## [0.2.4] - 2026-08-07
+
+### Fixed
++- Fixed data loss bug in `StaticPayloads` deserialization where unsorted payloads caused `build_category_ranges` to overwrite category spans in `BTreeMap`, dropping payloads silently.
++- Added fail-closed validation for `parse_marker_position("replace:")` to reject empty placeholders that corrupt payload string structure.
++- Updated `mutate_encoding_mix` payload length guard to check character count instead of byte length, preventing single multi-byte UTF-8 character payloads from splitting into empty string variants.
++- Replaced `let _ = write!` in `src/encoding.rs` with `.expect("writing to a String sink is infallible")` for error handling consistency.
++- Added validation checks in `src/validate.rs` for empty technique, encoding, and context names.
+
 ## [0.2.3] - 2026-08-07
 
 ### Fixed

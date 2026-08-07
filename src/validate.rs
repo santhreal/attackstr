@@ -82,10 +82,10 @@ pub fn validate(grammar: &Grammar) -> Vec<GrammarIssue> {
     let name = &grammar.meta.name;
 
     validate_meta(&grammar.meta, name, &mut issues);
+    validate_contexts(grammar, name, &mut issues);
     validate_techniques(grammar, name, &mut issues);
     validate_encodings(grammar, name, &mut issues);
     validate_variables(grammar, name, &mut issues);
-
     issues
 }
 
@@ -117,6 +117,13 @@ fn validate_techniques(grammar: &Grammar, name: &str, issues: &mut Vec<GrammarIs
     }
 
     for tech in &grammar.techniques {
+        if tech.name.trim().is_empty() {
+            issues.push(GrammarIssue {
+                grammar: name.into(),
+                level: IssueLevel::Error,
+                message: "technique has empty name".into(),
+            });
+        }
         if tech.template.trim().is_empty() {
             issues.push(GrammarIssue {
                 grammar: name.into(),
@@ -200,6 +207,13 @@ fn check_template_variables(
 
 fn validate_encodings(grammar: &Grammar, name: &str, issues: &mut Vec<GrammarIssue>) {
     for enc in &grammar.encodings {
+        if enc.name.trim().is_empty() {
+            issues.push(GrammarIssue {
+                grammar: name.into(),
+                level: IssueLevel::Error,
+                message: format!("encoding transform '{}' has empty name", enc.transform),
+            });
+        }
         if !crate::encoding::BuiltinEncoding::is_builtin(&enc.transform) {
             issues.push(GrammarIssue {
                 grammar: name.into(),
@@ -208,6 +222,18 @@ fn validate_encodings(grammar: &Grammar, name: &str, issues: &mut Vec<GrammarIss
                     "encoding '{}' uses unknown transform '{}' (not a built-in). If it is not a registered custom encoding, loading fails closed: the payload is rejected, not passed through.",
                     enc.name, enc.transform
                 ),
+            });
+        }
+    }
+}
+
+fn validate_contexts(grammar: &Grammar, name: &str, issues: &mut Vec<GrammarIssue>) {
+    for ctx in &grammar.contexts {
+        if ctx.name.trim().is_empty() {
+            issues.push(GrammarIssue {
+                grammar: name.into(),
+                level: IssueLevel::Error,
+                message: "context has empty name".into(),
             });
         }
     }

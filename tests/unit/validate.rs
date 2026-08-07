@@ -57,6 +57,34 @@ fn empty_name_is_error() {
         .iter()
         .any(|i| i.level == IssueLevel::Error && i.message.contains("name is empty")));
 }
+#[test]
+fn empty_context_technique_encoding_names_are_errors() {
+    let g = Grammar {
+        meta: meta("test", "cat"),
+        contexts: vec![Context {
+            name: "   ".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            target_media_type: None,
+        }],
+        techniques: vec![Technique {
+            name: "".into(),
+            template: "payload".into(),
+            tags: vec![],
+            confidence: 1.0,
+            expected_pattern: None,
+        }],
+        encodings: vec![Encoding {
+            name: "".into(),
+            transform: "identity".into(),
+        }],
+        variables: HashMap::new(),
+    };
+    let issues = validate(&g);
+    assert!(issues.iter().any(|i| i.level == IssueLevel::Error && i.message.contains("context has empty name")));
+    assert!(issues.iter().any(|i| i.level == IssueLevel::Error && i.message.contains("technique has empty name")));
+    assert!(issues.iter().any(|i| i.level == IssueLevel::Error && i.message.contains("has empty name")));
+}
 
 #[test]
 fn empty_category_is_error() {

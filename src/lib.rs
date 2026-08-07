@@ -302,6 +302,7 @@ impl From<Vec<Payload>> for StaticPayloads {
 impl PayloadSource for StaticPayloads {
     fn payloads(&mut self, category: &str) -> &[Payload] {
         if self.category_ranges.is_empty() && !self.payloads.is_empty() {
+            sort_payloads_by_category(&mut self.payloads);
             self.category_ranges = build_category_ranges(&self.payloads);
         }
         self.category_ranges

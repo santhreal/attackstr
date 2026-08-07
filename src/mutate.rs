@@ -55,7 +55,7 @@ pub fn mutate_encoding_mix(
     payload: &str,
     encodings: &[&str],
 ) -> Result<Vec<String>, EncodingError> {
-    if encodings.len() < 2 || payload.len() < 2 {
+    if encodings.len() < 2 || payload.chars().count() < 2 {
         return Ok(Vec::new());
     }
 

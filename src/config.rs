@@ -163,7 +163,14 @@ pub fn parse_marker_position(s: &str) -> Result<MarkerPosition, String> {
         "prefix" => Ok(MarkerPosition::Prefix),
         "suffix" => Ok(MarkerPosition::Suffix),
         "inline" => Ok(MarkerPosition::Inline),
-        s if s.starts_with("replace:") => Ok(MarkerPosition::Replace(s[8..].to_string())),
+        s if s.starts_with("replace:") => {
+            let placeholder = &s[8..];
+            if placeholder.is_empty() {
+                Err("invalid marker_position 'replace:': placeholder cannot be empty.".to_string())
+            } else {
+                Ok(MarkerPosition::Replace(placeholder.to_string()))
+            }
+        }
         _ => Err(format!("invalid marker_position '{s}': expected 'prefix', 'suffix', 'inline', or 'replace:PLACEHOLDER'.")),
     }
 }

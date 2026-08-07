@@ -34,6 +34,16 @@ fn all_mutations_combine_strategies() {
 }
 
 #[test]
+fn encoding_mix_single_multibyte_char_returns_empty() {
+    // Single multi-byte character (count=1, len=4 bytes) must not be split into empty string + char
+    let variants = mutate_encoding_mix("🦀", &["url_encode", "hex"]).unwrap();
+    assert!(
+        variants.is_empty(),
+        "single character (even multibyte) cannot be split across encodings"
+    );
+}
+
+#[test]
 fn html_tag_case_mixing_uses_uppercase_first_alternation() {
     // The tag-casing path folds into `alternate_case(tag, 1)` (offset 1 =>
     // even index uppercase, odd lowercase), replacing the former

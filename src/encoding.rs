@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::fmt::Write;
 
 /// A trait for encoding transforms.
 ///
@@ -164,9 +165,7 @@ pub fn apply_encoding(s: &str, transform: &str) -> Result<String, EncodingError>
 fn percent_hex_encode(s: &str) -> String {
     s.bytes()
         .fold(String::with_capacity(s.len() * 3), |mut acc, b| {
-            use std::fmt::Write;
-            // Writing to a String sink is infallible.
-            let _ = write!(&mut acc, "%{b:02x}");
+            write!(&mut acc, "%{b:02x}").expect("writing to a String sink is infallible");
             acc
         })
 }
@@ -181,10 +180,11 @@ fn unicode_escape(s: &str) -> String {
                 let code = u - 0x1_0000;
                 let high = 0xD800 + (code >> 10);
                 let low = 0xDC00 + (code & 0x3FF);
-                let _ = write!(&mut acc, "\\u{:04x}\\u{:04x}", high, low);
+                write!(&mut acc, "\\u{:04x}\\u{:04x}", high, low)
+                    .expect("writing to a String sink is infallible");
             } else {
-                // Writing to a String sink is infallible.
-                let _ = write!(&mut acc, "\\u{:04x}", u);
+                write!(&mut acc, "\\u{:04x}", u)
+                    .expect("writing to a String sink is infallible");
             }
             acc
         })
@@ -193,9 +193,7 @@ fn unicode_escape(s: &str) -> String {
 fn octal_escape(s: &str) -> String {
     s.bytes()
         .fold(String::with_capacity(s.len() * 4), |mut acc, b| {
-            use std::fmt::Write;
-            // Writing to a String sink is infallible.
-            let _ = write!(&mut acc, "\\{b:03o}");
+            write!(&mut acc, "\\{b:03o}").expect("writing to a String sink is infallible");
             acc
         })
 }
@@ -287,9 +285,8 @@ fn rot13_encode(s: &str) -> String {
 fn css_escape(s: &str) -> String {
     s.chars()
         .fold(String::with_capacity(s.len() * 6), |mut acc, c| {
-            use std::fmt::Write;
-            // Writing to a String sink is infallible.
-            let _ = write!(&mut acc, "\\{:02x}", c as u32);
+            write!(&mut acc, "\\{:02x}", c as u32)
+                .expect("writing to a String sink is infallible");
             acc
         })
 }

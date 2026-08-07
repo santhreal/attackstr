@@ -261,6 +261,26 @@ template = "hello"
         assert_eq!(source.payload_count(), 1);
         assert_eq!(source.categories(), vec!["cat"]);
     }
+
+    #[test]
+    fn static_payloads_deserialized_unsorted_preserves_all_payloads() {
+        let payloads = vec![
+            create_test_payload("p1", "xss"),
+            create_test_payload("p2", "sqli"),
+            create_test_payload("p3", "xss"),
+        ];
+        let toml_str = toml::to_string(&StaticPayloads::new(payloads)).unwrap();
+        let mut source: StaticPayloads = toml::from_str(&toml_str).unwrap();
+
+        let xss = source.payloads("xss");
+        assert_eq!(
+            xss.len(),
+            2,
+            "deserialized StaticPayloads must return all xss payloads, not drop p1"
+        );
+        let sqli = source.payloads("sqli");
+        assert_eq!(sqli.len(), 1, "sqli payload must be retrievable");
+    }
 }
 
 #[cfg(test)]

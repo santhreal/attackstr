@@ -75,6 +75,10 @@ fn marker_position_parsing() {
         MarkerPosition::Replace("{MARKER}".into())
     );
     assert!(parse_marker_position("unknown").is_err());
+    assert!(
+        parse_marker_position("replace:").is_err(),
+        "empty replace placeholder must fail closed"
+    );
 }
 
 #[test]
