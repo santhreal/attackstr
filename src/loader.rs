@@ -382,9 +382,8 @@ impl PayloadDb {
         // `apply_encoding_dispatch` returns `Err(UnknownEncoding)`, which the
         // `payloads()` path would otherwise SILENTLY drop (Law 10). Fail closed at
         // the load boundary instead of losing the payload invisibly later.
-        let known_builtin = crate::encoding::BuiltinEncoding::ALL;
         for enc in &grammar.encodings {
-            let is_builtin = known_builtin.contains(&enc.transform.as_str());
+            let is_builtin = crate::encoding::BuiltinEncoding::is_builtin(&enc.transform);
             let is_custom = self.custom_encodings.contains_key(&enc.transform);
             if !is_builtin && !is_custom {
                 issues.push(GrammarIssue {

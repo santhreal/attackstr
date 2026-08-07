@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file. The format follows Keep a Changelog and the crate adheres to Semantic Versioning.
 
+## [0.2.3] - 2026-08-07
+
+### Fixed
+- Added strict HTML tag boundary checking to `mutate_html` so tag mutations (e.g. tag `a`) do not match prefixes of longer tag names like `<article>`.
+- Consolidated builtin encoding lookup in `loader.rs` and `validate.rs` to use `BuiltinEncoding::is_builtin`, single-sourcing validation through `BuiltinEncoding`'s `FromStr`.
+- Updated crate `authors` to `Santh <64453045+santhreal@users.noreply.github.com>` and declared `package.metadata.santh.status = "beta"`.
+
 ## [0.2.2] - 2026-08-02
 
 ### Fixed

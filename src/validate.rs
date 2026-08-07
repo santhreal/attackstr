@@ -199,9 +199,8 @@ fn check_template_variables(
 }
 
 fn validate_encodings(grammar: &Grammar, name: &str, issues: &mut Vec<GrammarIssue>) {
-    let known = crate::encoding::BuiltinEncoding::ALL;
     for enc in &grammar.encodings {
-        if !known.contains(&enc.transform.as_str()) {
+        if !crate::encoding::BuiltinEncoding::is_builtin(&enc.transform) {
             issues.push(GrammarIssue {
                 grammar: name.into(),
                 level: IssueLevel::Warning,

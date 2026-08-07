@@ -250,6 +250,16 @@ fn html_tag_mutation_rewrites_all_occurrences() {
         "second occurrence was not rewritten: {variants:?}"
     );
 }
+/// Tag replacement verifies tag boundary (next character is non-alphanumeric),
+/// so tag "a" does not match inside "<article>".
+#[test]
+fn html_tag_mutation_respects_tag_boundary() {
+    let variants = mutate_html("<article>ALERT(1)</article>");
+    assert!(
+        !variants.iter().any(|v| v.contains("<a/")),
+        "tag 'a' mutation incorrectly matched prefix of '<article': {variants:?}"
+    );
+}
 
 /// The `case_alternate` encoding and the `mutate_case` mutation share one
 /// `alternate_case` owner; they must agree on non-ASCII input so a maintainer

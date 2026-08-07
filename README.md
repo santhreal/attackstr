@@ -1,6 +1,6 @@
 # attackstr
 
-Part of [Santh](https://santh.dev) - open source Rust security and infrastructure tooling. Follow [@SanthProject](https://x.com/SanthProject) on X.
+Part of [Santh](https://santh.dev) - open source Rust security and infrastructure tooling.
 
 Generate attack strings from TOML grammars. You define contexts, techniques, variables, and encodings in a TOML file. attackstr expands them into every combination and hands you back structured payloads with metadata.
 

@@ -196,6 +196,7 @@ fn replace_tag_span(payload: &str, tag: &str, replacement: &str) -> Option<Strin
             && payload
                 .get(i + 1..i + span)
                 .is_some_and(|s| s.eq_ignore_ascii_case(tag))
+            && (i + span == bytes.len() || !bytes[i + span].is_ascii_alphanumeric())
         {
             out.push_str(&payload[last..i]);
             out.push_str(replacement);

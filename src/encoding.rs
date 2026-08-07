@@ -408,6 +408,11 @@ impl std::str::FromStr for BuiltinEncoding {
 }
 
 impl BuiltinEncoding {
+    /// Check whether `name` (canonical or alias) is a recognized builtin encoding.
+    pub fn is_builtin(name: &str) -> bool {
+        name.parse::<Self>().is_ok()
+    }
+
     /// Apply this encoding to `s`.
     fn apply(self, s: &str) -> String {
         match self {
