@@ -70,6 +70,15 @@ fn expand_template_recursion_limit_errors() {
         TemplateExpansionError::RecursionLimitExceeded { max_depth: 50 }
     ));
 }
+#[test]
+fn expand_template_deeply_nested_escaped_braces_does_not_overflow_stack() {
+    let lookup = HashMap::new();
+    // 100,000 escaped braces would overflow thread call-stack if using call-stack recursion
+    let template = "{{".repeat(10_000);
+    let res = expand_template(template, &lookup).unwrap();
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0], "{".repeat(10_000));
+}
 
 #[test]
 fn depluralize_cases() {

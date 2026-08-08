@@ -543,7 +543,16 @@ impl PayloadDb {
             MarkerPosition::Prefix => format!("{marker}{payload}"),
             MarkerPosition::Suffix => format!("{payload}{marker}"),
             MarkerPosition::Inline => format!("{{{marker}}}{payload}"),
-            MarkerPosition::Replace(placeholder) => payload.replace(placeholder, marker),
+            MarkerPosition::Replace(placeholder) => {
+                if !payload.contains(placeholder) {
+                    tracing::warn!(
+                        placeholder,
+                        payload,
+                        "attackstr: marker replacement placeholder not found in payload; returning payload without marker"
+                    );
+                }
+                payload.replace(placeholder, marker)
+            }
         }
     }
 }

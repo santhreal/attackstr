@@ -90,14 +90,14 @@ pub fn validate(grammar: &Grammar) -> Vec<GrammarIssue> {
 }
 
 fn validate_meta(meta: &GrammarMeta, name: &str, issues: &mut Vec<GrammarIssue>) {
-    if meta.name.is_empty() {
+    if meta.name.trim().is_empty() {
         issues.push(GrammarIssue {
             grammar: name.into(),
             level: IssueLevel::Error,
             message: "grammar name is empty".into(),
         });
     }
-    if meta.sink_category.is_empty() {
+    if meta.sink_category.trim().is_empty() {
         issues.push(GrammarIssue {
             grammar: name.into(),
             level: IssueLevel::Error,
@@ -244,6 +244,13 @@ fn validate_variables(grammar: &Grammar, name: &str, issues: &mut Vec<GrammarIss
         // Skip known non-variable keys.
         if ["grammar", "contexts", "techniques", "encodings"].contains(&var_name.as_str()) {
             continue;
+        }
+        if var_name.trim().is_empty() {
+            issues.push(GrammarIssue {
+                grammar: name.into(),
+                level: IssueLevel::Error,
+                message: "variable has empty name".into(),
+            });
         }
         if values.is_empty() {
             issues.push(GrammarIssue {

@@ -246,6 +246,40 @@ fn prefix_suffix_not_flagged_as_undefined() {
     let issues = validate(&g);
     assert!(issues.is_empty(), "unexpected: {issues:?}");
 }
+#[test]
+fn empty_variable_name_is_error() {
+    let mut vars = HashMap::new();
+    vars.insert("   ".into(), vec!["value".into()]);
+    let g = Grammar {
+        meta: meta("test", "cat"),
+        contexts: vec![],
+        techniques: vec![Technique {
+            name: "t".into(),
+            template: "x".into(),
+            tags: vec![],
+            confidence: 1.0,
+            expected_pattern: None,
+        }],
+        encodings: vec![],
+        variables: vars,
+    };
+    let issues = validate(&g);
+    assert!(issues.iter().any(|i| i.level == IssueLevel::Error && i.message.contains("variable has empty name")));
+}
+
+#[test]
+fn whitespace_only_meta_names_are_errors() {
+    let g = Grammar {
+        meta: meta("  ", "\t"),
+        contexts: vec![],
+        techniques: vec![],
+        encodings: vec![],
+        variables: HashMap::new(),
+    };
+    let issues = validate(&g);
+    assert!(issues.iter().any(|i| i.level == IssueLevel::Error && i.message.contains("grammar name is empty")));
+    assert!(issues.iter().any(|i| i.level == IssueLevel::Error && i.message.contains("sink_category is empty")));
+}
 
 #[test]
 fn plural_variable_resolves() {

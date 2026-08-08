@@ -628,59 +628,8 @@ pub fn expand_template(
     template: String,
     lookup: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<String>, TemplateExpansionError> {
-    expand_template_with_depth(template, lookup, 0)
-}
-
-fn expand_template_with_depth(
-    template: String,
-    lookup: &HashMap<String, Vec<String>>,
-    depth: usize,
-) -> Result<Vec<String>, TemplateExpansionError> {
-    if depth > MAX_TEMPLATE_RECURSION_DEPTH {
-        return Err(TemplateExpansionError::RecursionLimitExceeded {
-            max_depth: MAX_TEMPLATE_RECURSION_DEPTH,
-        });
-    }
-    if template.len() > MAX_TEMPLATE_LENGTH {
-        return Err(TemplateExpansionError::ExpansionLengthExceeded {
-            max_len: MAX_TEMPLATE_LENGTH,
-        });
-    }
-
-    let Some(start) = template.find('{') else {
-        return Ok(vec![template.replace("}}", "}")]);
-    };
-    // Escaped brace: "{{" becomes literal "{".
-    if template[start..].starts_with("{{") {
-        let before = &template[..start];
-        let after = &template[start + 2..];
-        let mut results = Vec::new();
-        for expanded_after in expand_template_with_depth(after.to_string(), lookup, depth)? {
-            results.push(format!("{before}{{{expanded_after}"));
-        }
-        return Ok(results);
-    }
-    let Some(rel_end) = template[start..].find('}') else {
-        return Err(TemplateExpansionError::UnclosedBrace { template });
-    };
-    let end = start + rel_end;
-    let var_name = &template[start + 1..end];
-    let before = &template[..start];
-    let after = &template[end + 1..];
-
-    let mut results = Vec::new();
-    if let Some(values) = lookup.get(var_name) {
-        for val in values {
-            let new_template = format!("{before}{val}{after}");
-            results.extend(expand_template_with_depth(new_template, lookup, depth + 1)?);
-        }
-    } else {
-        // Unknown variable  -  preserve placeholder, continue expanding `after`.
-        for expanded_after in expand_template_with_depth(after.to_string(), lookup, depth)? {
-            results.push(format!("{before}{{{var_name}}}{expanded_after}"));
-        }
-    }
-    Ok(results)
+    let iter = TemplateExpansionIter::new(template, Arc::new(lookup.clone()))?;
+    iter.collect()
 }
 
 /// Simple depluralization for variable name matching.
